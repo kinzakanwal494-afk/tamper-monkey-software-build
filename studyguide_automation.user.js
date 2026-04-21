@@ -1,0 +1,1950 @@
+// ==UserScript==
+// @name         StudyGuide AI Automation v13 - Text + Gemini Images
+// @namespace    https://github.com/studyguide-automation
+// @version      13.0.0
+// @description  v13 — Automated exam study-guide generation. Text pages + Gemini images + equations + charts, captured from DOM and posted to Google Docs via Apps Script.
+// @author       StudyGuide Automation
+// @match        https://chat.openai.com/*
+// @match        https://chatgpt.com/*
+// @match        https://gemini.google.com/*
+// @match        https://aistudio.google.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        GM_notification
+// @grant        GM_openInTab
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ─────────────────────────────────────────────────────────────
+  //  CONSTANTS & STORAGE
+  // ─────────────────────────────────────────────────────────────
+  const APP_ID = 'SG_V13';
+  const GEMINI_URL = 'https://gemini.google.com/app';
+
+  const STORAGE_KEYS = {
+    APPS_SCRIPT_URL: `${APP_ID}_appsScriptUrl`,
+    DOC_ID:          `${APP_ID}_docId`,
+    EXAM_CONFIG:     `${APP_ID}_examConfig`,
+    IMAGE_CONFIG:    `${APP_ID}_imageConfig`,
+    DOMAINS:         `${APP_ID}_domains`,
+    REF_CONFIG:      `${APP_ID}_refConfig`,
+    WORKFLOW:        `${APP_ID}_workflow`,
+    PROGRESS:        `${APP_ID}_progress`,
+    PIPELINE_STATE:  `${APP_ID}_pipelineState`,
+  };
+
+  const STATE = {
+    IDLE:    'IDLE',
+    RUNNING: 'RUNNING',
+    PAUSED:  'PAUSED',
+    STOPPED: 'STOPPED',
+    ERROR:   'ERROR',
+  };
+
+  // Default configurations (all image toggles default ON per spec)
+  const DEFAULT_EXAM_CONFIG = {
+    examName:       '',
+    totalPages:     50,
+    wordsPerPage:   650,
+    minLinesPerPara: 4,
+    maxLinesPerPara: 8,
+    startFromPage:  1,
+  };
+
+  const DEFAULT_IMAGE_CONFIG = {
+    enableGemini:           true,
+    requiresPlus:           true,
+    equationsAsImages:      true,
+    mathVisualRendering:    true,
+    generateCharts:         true,
+    dataChartsSupplyDemand: true,
+    generateDiagrams:       true,
+    networkAnatomyFlow:     true,
+    maxWaitGeminiSec:       120,
+  };
+
+  const DEFAULT_REF_CONFIG = {
+    reminderEveryPages:  5,
+    validateQuality:     true,
+    stripSourceMentions: true,
+    autoStopOnMissing:   true,
+  };
+
+  const DEFAULT_WORKFLOW = {
+    outlineUploaded: false,
+    booksUploaded:   false,
+  };
+
+  const DEFAULT_PROGRESS = {
+    percent:    0,
+    message:    'Waiting to start...',
+    pagesDone:  0,
+    pagesTotal: 0,
+    done:       0,
+    failed:     0,
+    retries:    0,
+    words:      0,
+    skipped:    0,
+    images:     0,
+    recent:     [],
+    currentPage: 0,
+  };
+
+  // v13 Enforced reference rules (shown in UI, always on)
+  const V13_RULES = [
+    'Reference books ONLY — zero training data',
+    'Domain/Subdomain headings: once on first page ONLY',
+    'Specific ###topic headings — no generic names',
+    'Math/Physics: real equations, not placeholders',
+    'Chemistry: balanced reactions with state symbols',
+    'Code: complete runnable examples with output',
+    'Missing reference → Upload/Skip popup',
+    'v13 NEW: Gemini images generated automatically',
+  ];
+
+  // ─────────────────────────────────────────────────────────────
+  //  STYLES
+  // ─────────────────────────────────────────────────────────────
+  GM_addStyle(`
+    #sg-panel {
+      position: fixed;
+      top: 70px;
+      right: 16px;
+      width: 420px;
+      max-height: 92vh;
+      background: #0b1220;
+      color: #e2e8f0;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.65);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      z-index: 2147483647;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #sg-panel.collapsed { max-height: 50px; }
+    #sg-header {
+      background: linear-gradient(135deg, #1e3a5f, #0f4c81);
+      padding: 11px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    #sg-header h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #7dd3fc;
+      letter-spacing: 0.4px;
+    }
+    #sg-header-controls { display: flex; gap: 6px; align-items: center; }
+    .sg-hbtn {
+      background: rgba(255,255,255,0.12);
+      border: none;
+      color: #e2e8f0;
+      padding: 3px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .sg-hbtn:hover { background: rgba(255,255,255,0.25); }
+    #sg-body {
+      overflow-y: auto;
+      flex: 1;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #sg-body::-webkit-scrollbar { width: 6px; }
+    #sg-body::-webkit-scrollbar-track { background: #0f172a; }
+    #sg-body::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+    .sg-section {
+      background: #111c30;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 11px 12px;
+    }
+    .sg-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #7dd3fc;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sg-section-sub {
+      font-size: 10.5px;
+      color: #64748b;
+      margin-bottom: 8px;
+      line-height: 1.45;
+    }
+    .sg-badge-required {
+      background: #7f1d1d;
+      color: #fecaca;
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 10px;
+      letter-spacing: 0.5px;
+    }
+    .sg-badge-on {
+      background: #052e16;
+      color: #4ade80;
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 10px;
+      letter-spacing: 0.5px;
+      border: 1px solid #16a34a;
+    }
+
+    .sg-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .sg-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+
+    .sg-field { margin-bottom: 8px; }
+    .sg-field label {
+      display: block;
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 3px;
+      font-weight: 600;
+    }
+    .sg-field input, .sg-field textarea, .sg-field select {
+      width: 100%;
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 6px 9px;
+      font-size: 12px;
+      box-sizing: border-box;
+      outline: none;
+    }
+    .sg-field input:focus, .sg-field textarea:focus {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+    }
+    .sg-field textarea { resize: vertical; min-height: 52px; }
+
+    /* Toggle row */
+    .sg-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px dashed #1e293b;
+    }
+    .sg-toggle-row:last-child { border-bottom: none; }
+    .sg-toggle-label {
+      flex: 1;
+      font-size: 11.5px;
+      color: #cbd5e1;
+    }
+    .sg-toggle-sub {
+      display: block;
+      font-size: 10px;
+      color: #64748b;
+      margin-top: 2px;
+    }
+    .sg-toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      background: #334155;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .sg-toggle::before {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      transition: left 0.2s;
+    }
+    .sg-toggle.on {
+      background: #16a34a;
+    }
+    .sg-toggle.on::before { left: 18px; }
+
+    /* Save button */
+    .sg-save-btn {
+      width: 100%;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      padding: 7px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 6px;
+    }
+    .sg-save-btn:hover { background: #1d4ed8; }
+
+    /* v13 Rule list */
+    .sg-rules {
+      list-style: none;
+      margin: 0; padding: 0;
+      font-size: 11px;
+      color: #cbd5e1;
+    }
+    .sg-rules li { padding: 3px 0; }
+    .sg-rules li::before {
+      content: '✓ ';
+      color: #4ade80;
+      font-weight: 700;
+      margin-right: 3px;
+    }
+
+    /* Workflow */
+    .sg-step-card {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .sg-step-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #e2e8f0;
+      margin-bottom: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sg-step-sub {
+      font-size: 10.5px;
+      color: #94a3b8;
+      margin-bottom: 7px;
+      line-height: 1.4;
+    }
+    .sg-step-actions { display: flex; gap: 6px; }
+    .sg-step-btn {
+      flex: 1;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .sg-step-btn:hover { background: #334155; }
+    .sg-step-btn.primary { background: #2563eb; border-color: #3b82f6; color: #fff; }
+    .sg-step-btn.primary:hover { background: #1d4ed8; }
+    .sg-step-btn.confirmed { background: #052e16; border-color: #16a34a; color: #4ade80; }
+
+    /* Domains list */
+    #sg-domains-list {
+      display: flex; flex-direction: column; gap: 6px;
+      margin-bottom: 8px;
+    }
+    .sg-domain-row {
+      display: grid;
+      grid-template-columns: 1fr 70px 26px;
+      gap: 6px;
+      align-items: center;
+    }
+    .sg-domain-row input {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 5px 8px;
+      font-size: 11.5px;
+      outline: none;
+    }
+    .sg-domain-row input:focus { border-color: #3b82f6; }
+    .sg-domain-del {
+      background: #2d0000;
+      border: 1px solid #dc2626;
+      color: #f87171;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 4px;
+    }
+    .sg-domain-del:hover { background: #7f1d1d; color: #fff; }
+    .sg-domain-hint {
+      font-size: 10px;
+      color: #64748b;
+      margin-bottom: 6px;
+      font-style: italic;
+    }
+
+    /* Big Auto Generate button */
+    #sg-auto-generate {
+      width: 100%;
+      background: linear-gradient(135deg, #059669, #0d9488);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 13px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      transition: all 0.2s;
+      text-transform: uppercase;
+    }
+    #sg-auto-generate:hover { opacity: 0.92; transform: translateY(-1px); }
+    #sg-auto-generate:disabled { opacity: 0.45; transform: none; cursor: not-allowed; }
+    #sg-auto-generate .sg-subline {
+      display: block;
+      font-size: 9.5px;
+      font-weight: 500;
+      color: rgba(255,255,255,0.78);
+      margin-top: 3px;
+      text-transform: none;
+      letter-spacing: 0.2px;
+    }
+
+    /* Progress */
+    #sg-progress-wrap {
+      background: #0b1220;
+      border-radius: 5px;
+      height: 10px;
+      overflow: hidden;
+      border: 1px solid #1e293b;
+    }
+    #sg-progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #2563eb, #7c3aed, #059669);
+      border-radius: 5px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+    .sg-progress-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-top: 9px;
+    }
+    .sg-stat {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 7px;
+      padding: 6px 8px;
+      text-align: center;
+    }
+    .sg-stat-val {
+      display: block;
+      font-size: 14px;
+      font-weight: 800;
+      color: #7dd3fc;
+      line-height: 1.2;
+    }
+    .sg-stat-lbl {
+      display: block;
+      font-size: 9.5px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-top: 2px;
+    }
+    .sg-stat.ok .sg-stat-val    { color: #4ade80; }
+    .sg-stat.fail .sg-stat-val  { color: #f87171; }
+    .sg-stat.retry .sg-stat-val { color: #fbbf24; }
+    .sg-stat.skip .sg-stat-val  { color: #94a3b8; }
+    .sg-stat.img .sg-stat-val   { color: #c084fc; }
+    .sg-stat.word .sg-stat-val  { color: #7dd3fc; }
+
+    #sg-progress-text {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 6px;
+      text-align: center;
+    }
+    #sg-progress-pct {
+      font-size: 22px;
+      font-weight: 800;
+      color: #7dd3fc;
+      text-align: center;
+      margin-bottom: 4px;
+    }
+
+    /* Recent pages */
+    #sg-recent-pages {
+      max-height: 100px;
+      overflow-y: auto;
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 10.5px;
+      color: #94a3b8;
+      margin-top: 8px;
+    }
+    #sg-recent-pages::-webkit-scrollbar { width: 4px; }
+    #sg-recent-pages::-webkit-scrollbar-thumb { background: #334155; }
+    .sg-recent-item {
+      padding: 2px 0;
+      border-bottom: 1px dashed #1e293b;
+      display: flex;
+      justify-content: space-between;
+    }
+    .sg-recent-item:last-child { border-bottom: none; }
+    .sg-recent-status { font-size: 10px; font-weight: 700; }
+
+    /* Control buttons */
+    .sg-controls {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+    .sg-btn {
+      border: none;
+      border-radius: 7px;
+      padding: 8px 5px;
+      font-size: 10.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.3px;
+    }
+    .sg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sg-btn-start  { background: #16a34a; color: #fff; }
+    .sg-btn-start:hover:not(:disabled)  { background: #15803d; }
+    .sg-btn-pause  { background: #d97706; color: #fff; }
+    .sg-btn-pause:hover:not(:disabled)  { background: #b45309; }
+    .sg-btn-resume { background: #0891b2; color: #fff; }
+    .sg-btn-resume:hover:not(:disabled) { background: #0e7490; }
+    .sg-btn-stop   { background: #dc2626; color: #fff; }
+    .sg-btn-stop:hover:not(:disabled)   { background: #b91c1c; }
+    .sg-btn-retry  { background: #7c3aed; color: #fff; }
+    .sg-btn-retry:hover:not(:disabled)  { background: #6d28d9; }
+    .sg-btn-skip   { background: #475569; color: #fff; }
+    .sg-btn-skip:hover:not(:disabled)   { background: #334155; }
+    .sg-btn-reset  { background: #1e293b; color: #f87171; border: 1px solid #dc2626; grid-column: span 3; }
+    .sg-btn-reset:hover:not(:disabled)  { background: #7f1d1d; color: #fff; }
+
+    /* Status */
+    #sg-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 700;
+    }
+    .badge-idle    { background: #1e293b; color: #64748b; border: 1px solid #334155; }
+    .badge-running { background: #052e16; color: #4ade80; border: 1px solid #16a34a; }
+    .badge-paused  { background: #431407; color: #fb923c; border: 1px solid #d97706; }
+    .badge-stopped { background: #1a1a1a; color: #94a3b8; border: 1px solid #475569; }
+    .badge-error   { background: #2d0000; color: #f87171; border: 1px solid #dc2626; }
+    .badge-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: currentColor;
+    }
+    .badge-running .badge-dot { animation: sg-pulse 1.2s ease-in-out infinite; }
+    @keyframes sg-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    /* Live console */
+    #sg-console {
+      background: #020617;
+      border: 1px solid #1e293b;
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-family: 'Courier New', Consolas, monospace;
+      font-size: 10.5px;
+      height: 150px;
+      overflow-y: auto;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+    #sg-console::-webkit-scrollbar { width: 4px; }
+    #sg-console::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+    .log-info  { color: #60a5fa; }
+    .log-ok    { color: #4ade80; }
+    .log-warn  { color: #fbbf24; }
+    .log-error { color: #f87171; }
+    .log-img   { color: #c084fc; }
+    .log-sys   { color: #94a3b8; font-style: italic; }
+
+    /* Upload / Skip popup */
+    #sg-popup-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 2147483646;
+    }
+    #sg-popup {
+      background: #0b1220;
+      border: 1px solid #dc2626;
+      border-radius: 12px;
+      padding: 22px;
+      width: 420px;
+      max-width: 90vw;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.8);
+      color: #e2e8f0;
+    }
+    #sg-popup h3 {
+      margin: 0 0 10px 0;
+      color: #f87171;
+      font-size: 16px;
+    }
+    #sg-popup p {
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.5;
+      margin-bottom: 14px;
+    }
+    #sg-popup .sg-popup-btns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+  `);
+
+  // ─────────────────────────────────────────────────────────────
+  //  RUNTIME STATE
+  // ─────────────────────────────────────────────────────────────
+  let currentState = STATE.IDLE;
+  let abortFlag    = false;
+  let pauseFlag    = false;
+  let skipFlag     = false;
+  let examConfig   = loadObj(STORAGE_KEYS.EXAM_CONFIG,  DEFAULT_EXAM_CONFIG);
+  let imageConfig  = loadObj(STORAGE_KEYS.IMAGE_CONFIG, DEFAULT_IMAGE_CONFIG);
+  let refConfig    = loadObj(STORAGE_KEYS.REF_CONFIG,   DEFAULT_REF_CONFIG);
+  let workflow     = loadObj(STORAGE_KEYS.WORKFLOW,     DEFAULT_WORKFLOW);
+  let progress     = loadObj(STORAGE_KEYS.PROGRESS,     DEFAULT_PROGRESS);
+  let domains      = loadObj(STORAGE_KEYS.DOMAINS,      []); // [{name, weight}]
+
+  // ─────────────────────────────────────────────────────────────
+  //  UI BUILD
+  // ─────────────────────────────────────────────────────────────
+  function buildUI() {
+    const panel = document.createElement('div');
+    panel.id = 'sg-panel';
+    panel.innerHTML = `
+      <div id="sg-header">
+        <h3>📖 StudyGuide AI — v13</h3>
+        <div id="sg-header-controls">
+          <span id="sg-status-badge" class="badge-idle"><span class="badge-dot"></span>IDLE</span>
+          <button class="sg-hbtn" id="sg-toggle-btn">▼</button>
+          <button class="sg-hbtn" id="sg-close-btn">✕</button>
+        </div>
+      </div>
+      <div id="sg-body">
+
+        <!-- 1. EXAM CONFIGURATION -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>📚 Exam Configuration</span>
+            <span class="sg-badge-required">REQUIRED</span>
+          </div>
+          <div class="sg-field">
+            <label>Exam Name</label>
+            <input type="text" id="sg-exam-name" placeholder="e.g. CompTIA Security+, USMLE Step 1, PMP..." />
+          </div>
+          <div class="sg-grid-3">
+            <div class="sg-field">
+              <label>Total Pages</label>
+              <input type="number" id="sg-total-pages" min="1" />
+            </div>
+            <div class="sg-field">
+              <label>Words / Page</label>
+              <input type="number" id="sg-words-page" min="100" />
+            </div>
+            <div class="sg-field">
+              <label>Start From Page</label>
+              <input type="number" id="sg-start-page" min="1" />
+            </div>
+          </div>
+          <div class="sg-grid-2">
+            <div class="sg-field">
+              <label>Min Lines / Para</label>
+              <input type="number" id="sg-min-lines" min="1" />
+            </div>
+            <div class="sg-field">
+              <label>Max Lines / Para</label>
+              <input type="number" id="sg-max-lines" min="1" />
+            </div>
+          </div>
+          <button class="sg-save-btn" id="sg-save-exam">💾 Save Exam Config</button>
+        </div>
+
+        <!-- 2. VISUAL CONTENT GENERATION -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>🎨 Visual Content Generation</span>
+            <span class="sg-badge-on">GEMINI</span>
+          </div>
+          <div class="sg-section-sub">
+            🎨 <b>Gemini Image Generation:</b> Script opens a new Gemini tab to generate diagrams, charts,
+            anatomical figures, chemical structures and circuit diagrams — automatically, based on exam type.<br>
+            ⏳ <b>Wait time:</b> Gemini takes 30–120 seconds per image. Script waits patiently.<br>
+            📥 <b>Save method:</b> Generated images are captured via DOM and sent to Google Docs.
+          </div>
+
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Enable Image Generation (Gemini)
+              <span class="sg-toggle-sub">Requires ChatGPT Plus/Pro account</span>
+            </div>
+            <div class="sg-toggle" id="tog-enableGemini"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">Requires ChatGPT Plus/Pro account</div>
+            <div class="sg-toggle" id="tog-requiresPlus"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Generate equations as images
+              <span class="sg-toggle-sub">Math / Physics / Chemistry equations rendered visually</span>
+            </div>
+            <div class="sg-toggle" id="tog-equationsAsImages"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">Math/Physics/Chemistry equations rendered visually</div>
+            <div class="sg-toggle" id="tog-mathVisualRendering"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Generate charts / graphs
+              <span class="sg-toggle-sub">Data charts, supply-demand curves, bar graphs</span>
+            </div>
+            <div class="sg-toggle" id="tog-generateCharts"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">Data charts, supply-demand curves, bar graphs</div>
+            <div class="sg-toggle" id="tog-dataChartsSupplyDemand"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Generate diagrams / flowcharts
+              <span class="sg-toggle-sub">Network diagrams, anatomy, process flows</span>
+            </div>
+            <div class="sg-toggle" id="tog-generateDiagrams"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">Network diagrams, anatomy, process flows</div>
+            <div class="sg-toggle" id="tog-networkAnatomyFlow"></div>
+          </div>
+
+          <div class="sg-field" style="margin-top:8px">
+            <label>Max wait for Gemini (seconds)</label>
+            <input type="number" id="sg-max-wait" min="10" max="600" />
+          </div>
+          <button class="sg-save-btn" id="sg-save-image">💾 Save Image Config</button>
+        </div>
+
+        <!-- 3. DOMAIN WEIGHTS -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>⚖ Domain Weights</span>
+            <span class="sg-badge-on">AUTO-DETECT</span>
+          </div>
+          <div class="sg-domain-hint">
+            ⚡ Auto-Detect: Leave empty — after outline upload, UI auto-detects all domains + weights from GPT.
+          </div>
+          <div id="sg-domains-list"></div>
+          <div class="sg-grid-2" style="gap:6px">
+            <button class="sg-step-btn" id="sg-add-domain">➕ Add Domain</button>
+            <button class="sg-step-btn primary" id="sg-detect-domains">🔍 Auto-Detect Now</button>
+          </div>
+          <div style="margin-top:6px;text-align:right;font-size:10px;color:#64748b" id="sg-weight-total">
+            Total weight: 0%
+          </div>
+        </div>
+
+        <!-- 4. REFERENCE ENFORCEMENT -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>🔒 Reference Enforcement</span>
+            <span class="sg-badge-on">ALWAYS ON</span>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:#c084fc;margin-bottom:5px">
+            v13 Enforced Rules
+          </div>
+          <ul class="sg-rules">
+            ${V13_RULES.map(r => `<li>${escapeHtml(r)}</li>`).join('')}
+          </ul>
+
+          <div class="sg-toggle-row" style="margin-top:8px">
+            <div class="sg-toggle-label">
+              Reference reminder every N pages
+              <span class="sg-toggle-sub">Re-sends strict content rules</span>
+            </div>
+            <div class="sg-toggle on" id="tog-refReminderEnabled"></div>
+          </div>
+          <div class="sg-field">
+            <label>Remind every (pages)</label>
+            <input type="number" id="sg-remind-every" min="1" max="50" />
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Validate response quality
+              <span class="sg-toggle-sub">Reject + retry if response has forbidden patterns</span>
+            </div>
+            <div class="sg-toggle" id="tog-validateQuality"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">Strip source mentions before saving</div>
+            <div class="sg-toggle" id="tog-stripSourceMentions"></div>
+          </div>
+          <div class="sg-toggle-row">
+            <div class="sg-toggle-label">
+              Auto-stop on missing reference
+              <span class="sg-toggle-sub">Shows upload popup when GPT can't find content</span>
+            </div>
+            <div class="sg-toggle" id="tog-autoStopOnMissing"></div>
+          </div>
+          <button class="sg-save-btn" id="sg-save-ref">💾 Save Reference Config</button>
+        </div>
+
+        <!-- 5. WORKFLOW STEPS -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>📋 Workflow Steps</span>
+          </div>
+
+          <div class="sg-step-card">
+            <div class="sg-step-title">1️⃣ Upload Exam Outline</div>
+            <div class="sg-step-sub">
+              Click GPT + → upload outline → confirm here. UI auto-detects domains.
+            </div>
+            <div class="sg-step-actions">
+              <button class="sg-step-btn primary" id="sg-open-outline">📎 Open GPT Upload</button>
+              <button class="sg-step-btn" id="sg-confirm-outline">✓ Confirm Outline</button>
+            </div>
+          </div>
+
+          <div class="sg-step-card">
+            <div class="sg-step-title">2️⃣ Upload Reference Books</div>
+            <div class="sg-step-sub">
+              Upload ALL reference PDFs to GPT, then confirm.
+            </div>
+            <div class="sg-step-actions">
+              <button class="sg-step-btn primary" id="sg-open-books">📚 Open GPT Upload</button>
+              <button class="sg-step-btn" id="sg-confirm-books">✓ Confirm Books</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. AUTO GENERATE -->
+        <div class="sg-section">
+          <button id="sg-auto-generate">
+            ⚡ Auto Generate — Text + Images
+            <span class="sg-subline">
+              v13: Text pages + Gemini images + equations + charts generated automatically.
+              Images detected from DOM and saved to Google Docs.
+            </span>
+          </button>
+        </div>
+
+        <!-- 7. GENERATION PROGRESS -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>📊 Generation Progress</span>
+            <span id="sg-page-counter" style="color:#7dd3fc;font-weight:700">0 / 0 pages</span>
+          </div>
+          <div id="sg-progress-pct">0%</div>
+          <div id="sg-progress-wrap"><div id="sg-progress-bar"></div></div>
+          <div id="sg-progress-text">Waiting to start...</div>
+
+          <div class="sg-progress-stats">
+            <div class="sg-stat ok"><span class="sg-stat-val" id="sg-stat-done">0</span><span class="sg-stat-lbl">done</span></div>
+            <div class="sg-stat fail"><span class="sg-stat-val" id="sg-stat-failed">0</span><span class="sg-stat-lbl">failed</span></div>
+            <div class="sg-stat retry"><span class="sg-stat-val" id="sg-stat-retries">0</span><span class="sg-stat-lbl">retries</span></div>
+            <div class="sg-stat word"><span class="sg-stat-val" id="sg-stat-words">0</span><span class="sg-stat-lbl">words</span></div>
+            <div class="sg-stat skip"><span class="sg-stat-val" id="sg-stat-skipped">⏭ 0</span><span class="sg-stat-lbl">skipped</span></div>
+            <div class="sg-stat img"><span class="sg-stat-val" id="sg-stat-images">🖼 0</span><span class="sg-stat-lbl">images</span></div>
+          </div>
+
+          <div style="margin-top:10px;font-size:10.5px;color:#94a3b8;font-weight:700">Recent Pages</div>
+          <div id="sg-recent-pages"><div style="color:#475569">No pages generated yet.</div></div>
+        </div>
+
+        <!-- 8. CONTROLS -->
+        <div class="sg-section">
+          <div class="sg-section-title"><span>🎯 Controls</span></div>
+          <div class="sg-controls">
+            <button class="sg-btn sg-btn-start"  id="sg-btn-start">▶ Start Generation</button>
+            <button class="sg-btn sg-btn-pause"  id="sg-btn-pause"  disabled>⏸ Pause</button>
+            <button class="sg-btn sg-btn-resume" id="sg-btn-resume" disabled>▶ Resume</button>
+            <button class="sg-btn sg-btn-retry"  id="sg-btn-retry"  disabled>↺ Retry Page</button>
+            <button class="sg-btn sg-btn-skip"   id="sg-btn-skip"   disabled>⏭ Skip Page</button>
+            <button class="sg-btn sg-btn-stop"   id="sg-btn-stop"   disabled>⏹ Stop</button>
+            <button class="sg-btn sg-btn-reset"  id="sg-btn-reset">🗑 Reset Everything</button>
+          </div>
+        </div>
+
+        <!-- 9. LIVE CONSOLE -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>💻 Live Console</span>
+            <button class="sg-hbtn" id="sg-clear-console">🗑</button>
+          </div>
+          <div id="sg-console"></div>
+        </div>
+
+        <!-- Apps Script config (utility, small footer) -->
+        <div class="sg-section">
+          <div class="sg-section-title"><span>🔗 Google Docs Connection</span></div>
+          <div class="sg-field">
+            <label>Apps Script Web URL</label>
+            <input type="text" id="sg-apps-script-url" placeholder="https://script.google.com/macros/s/.../exec" />
+          </div>
+          <div class="sg-field">
+            <label>Google Doc ID</label>
+            <input type="text" id="sg-doc-id" placeholder="Doc ID (from URL)" />
+          </div>
+          <button class="sg-save-btn" id="sg-save-docs">💾 Save Docs Config</button>
+        </div>
+
+      </div>
+
+      <!-- Missing reference popup -->
+      <div id="sg-popup-overlay">
+        <div id="sg-popup">
+          <h3 id="sg-popup-title">⚠ Missing Reference</h3>
+          <p id="sg-popup-body">GPT could not find the referenced content. Upload the missing reference or skip this page.</p>
+          <div class="sg-popup-btns">
+            <button class="sg-step-btn primary" id="sg-popup-upload">📎 Upload Reference</button>
+            <button class="sg-step-btn" id="sg-popup-skip">⏭ Skip Page</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    applyConfigsToUI();
+    renderDomains();
+    updateProgressUI();
+    bindEvents();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  LOAD / APPLY CONFIG
+  // ─────────────────────────────────────────────────────────────
+  function applyConfigsToUI() {
+    // Exam
+    $('#sg-exam-name').value    = examConfig.examName || '';
+    $('#sg-total-pages').value  = examConfig.totalPages;
+    $('#sg-words-page').value   = examConfig.wordsPerPage;
+    $('#sg-start-page').value   = examConfig.startFromPage;
+    $('#sg-min-lines').value    = examConfig.minLinesPerPara;
+    $('#sg-max-lines').value    = examConfig.maxLinesPerPara;
+
+    // Image toggles
+    setToggle('tog-enableGemini',          imageConfig.enableGemini);
+    setToggle('tog-requiresPlus',          imageConfig.requiresPlus);
+    setToggle('tog-equationsAsImages',     imageConfig.equationsAsImages);
+    setToggle('tog-mathVisualRendering',   imageConfig.mathVisualRendering);
+    setToggle('tog-generateCharts',        imageConfig.generateCharts);
+    setToggle('tog-dataChartsSupplyDemand',imageConfig.dataChartsSupplyDemand);
+    setToggle('tog-generateDiagrams',      imageConfig.generateDiagrams);
+    setToggle('tog-networkAnatomyFlow',    imageConfig.networkAnatomyFlow);
+    $('#sg-max-wait').value = imageConfig.maxWaitGeminiSec;
+
+    // Reference
+    $('#sg-remind-every').value = refConfig.reminderEveryPages;
+    setToggle('tog-validateQuality',     refConfig.validateQuality);
+    setToggle('tog-stripSourceMentions', refConfig.stripSourceMentions);
+    setToggle('tog-autoStopOnMissing',   refConfig.autoStopOnMissing);
+
+    // Docs
+    $('#sg-apps-script-url').value = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
+    $('#sg-doc-id').value          = GM_getValue(STORAGE_KEYS.DOC_ID, '');
+
+    // Workflow
+    applyWorkflowUI();
+  }
+
+  function applyWorkflowUI() {
+    const b1 = $('#sg-confirm-outline');
+    const b2 = $('#sg-confirm-books');
+    if (b1) b1.classList.toggle('confirmed', workflow.outlineUploaded);
+    if (b2) b2.classList.toggle('confirmed', workflow.booksUploaded);
+    if (b1) b1.textContent = workflow.outlineUploaded ? '✔ Outline Confirmed' : '✓ Confirm Outline';
+    if (b2) b2.textContent = workflow.booksUploaded   ? '✔ Books Confirmed'   : '✓ Confirm Books';
+  }
+
+  function setToggle(id, on) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('on', !!on);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  DOMAIN RENDER
+  // ─────────────────────────────────────────────────────────────
+  function renderDomains() {
+    const list = $('#sg-domains-list');
+    if (!list) return;
+    if (!domains.length) {
+      list.innerHTML = `<div style="font-size:11px;color:#64748b;font-style:italic">
+        No domains yet. Click "Auto-Detect Now" after uploading the outline, or add manually.
+      </div>`;
+    } else {
+      list.innerHTML = domains.map((d, i) => `
+        <div class="sg-domain-row">
+          <input type="text" placeholder="Domain name" value="${escapeAttr(d.name || '')}" data-idx="${i}" data-field="name" />
+          <input type="number" placeholder="%" min="0" max="100" value="${d.weight ?? ''}" data-idx="${i}" data-field="weight" />
+          <button class="sg-domain-del" data-idx="${i}" title="Remove">🗑</button>
+        </div>
+      `).join('');
+
+      list.querySelectorAll('input').forEach(inp => {
+        inp.addEventListener('input', (e) => {
+          const idx = +e.target.dataset.idx;
+          const field = e.target.dataset.field;
+          if (field === 'weight') {
+            domains[idx][field] = parseFloat(e.target.value) || 0;
+          } else {
+            domains[idx][field] = e.target.value;
+          }
+          saveObj(STORAGE_KEYS.DOMAINS, domains);
+          updateWeightTotal();
+        });
+      });
+
+      list.querySelectorAll('.sg-domain-del').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const idx = +e.target.dataset.idx;
+          domains.splice(idx, 1);
+          saveObj(STORAGE_KEYS.DOMAINS, domains);
+          renderDomains();
+          updateWeightTotal();
+        });
+      });
+    }
+    updateWeightTotal();
+  }
+
+  function updateWeightTotal() {
+    const total = domains.reduce((s, d) => s + (parseFloat(d.weight) || 0), 0);
+    const el = $('#sg-weight-total');
+    if (!el) return;
+    el.textContent = `Total weight: ${total.toFixed(1)}%`;
+    el.style.color = (Math.abs(total - 100) < 0.5) ? '#4ade80'
+                   : (total > 100 ? '#f87171' : '#fbbf24');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  EVENTS
+  // ─────────────────────────────────────────────────────────────
+  function bindEvents() {
+    $('#sg-toggle-btn').addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); });
+    $('#sg-header').addEventListener('click', togglePanel);
+    $('#sg-close-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      $('#sg-panel').style.display = 'none';
+    });
+
+    // Saves
+    $('#sg-save-exam').addEventListener('click', saveExamConfig);
+    $('#sg-save-image').addEventListener('click', saveImageConfig);
+    $('#sg-save-ref').addEventListener('click', saveRefConfig);
+    $('#sg-save-docs').addEventListener('click', saveDocsConfig);
+
+    // Toggles — clicking flips state and auto-saves immediately.
+    bindToggle('tog-enableGemini',          imageConfig, 'enableGemini',          STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-requiresPlus',          imageConfig, 'requiresPlus',          STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-equationsAsImages',     imageConfig, 'equationsAsImages',     STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-mathVisualRendering',   imageConfig, 'mathVisualRendering',   STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-generateCharts',        imageConfig, 'generateCharts',        STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-dataChartsSupplyDemand',imageConfig, 'dataChartsSupplyDemand',STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-generateDiagrams',      imageConfig, 'generateDiagrams',      STORAGE_KEYS.IMAGE_CONFIG);
+    bindToggle('tog-networkAnatomyFlow',    imageConfig, 'networkAnatomyFlow',    STORAGE_KEYS.IMAGE_CONFIG);
+
+    bindToggle('tog-validateQuality',     refConfig, 'validateQuality',     STORAGE_KEYS.REF_CONFIG);
+    bindToggle('tog-stripSourceMentions', refConfig, 'stripSourceMentions', STORAGE_KEYS.REF_CONFIG);
+    bindToggle('tog-autoStopOnMissing',   refConfig, 'autoStopOnMissing',   STORAGE_KEYS.REF_CONFIG);
+
+    // Domains
+    $('#sg-add-domain').addEventListener('click', () => {
+      domains.push({ name: '', weight: 0 });
+      saveObj(STORAGE_KEYS.DOMAINS, domains);
+      renderDomains();
+    });
+    $('#sg-detect-domains').addEventListener('click', autoDetectDomains);
+
+    // Workflow
+    $('#sg-open-outline').addEventListener('click', () => openGPTForUpload('outline'));
+    $('#sg-confirm-outline').addEventListener('click', () => confirmUpload('outline'));
+    $('#sg-open-books').addEventListener('click', () => openGPTForUpload('books'));
+    $('#sg-confirm-books').addEventListener('click', () => confirmUpload('books'));
+
+    // Auto-generate + controls
+    $('#sg-auto-generate').addEventListener('click', autoGenerate);
+    $('#sg-btn-start').addEventListener('click', startGeneration);
+    $('#sg-btn-pause').addEventListener('click', pauseGeneration);
+    $('#sg-btn-resume').addEventListener('click', resumeGeneration);
+    $('#sg-btn-retry').addEventListener('click', retryPage);
+    $('#sg-btn-skip').addEventListener('click', skipPage);
+    $('#sg-btn-stop').addEventListener('click', stopGeneration);
+    $('#sg-btn-reset').addEventListener('click', resetEverything);
+
+    // Console
+    $('#sg-clear-console').addEventListener('click', () => {
+      $('#sg-console').innerHTML = '';
+      log('Console cleared.', 'sys');
+    });
+
+    // Popup
+    $('#sg-popup-upload').addEventListener('click', () => {
+      hidePopup();
+      openGPTForUpload('missing');
+    });
+    $('#sg-popup-skip').addEventListener('click', () => {
+      hidePopup();
+      skipPage();
+    });
+  }
+
+  function bindToggle(id, target, field, storageKey) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('click', () => {
+      target[field] = !target[field];
+      el.classList.toggle('on', target[field]);
+      saveObj(storageKey, target);
+      log(`Toggle "${field}" → ${target[field] ? 'ON' : 'OFF'}`, 'sys');
+    });
+  }
+
+  function togglePanel() {
+    const p = $('#sg-panel');
+    p.classList.toggle('collapsed');
+    $('#sg-toggle-btn').textContent = p.classList.contains('collapsed') ? '▲' : '▼';
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  SAVE CONFIGS
+  // ─────────────────────────────────────────────────────────────
+  function saveExamConfig() {
+    examConfig = {
+      examName:        $('#sg-exam-name').value.trim(),
+      totalPages:      parseInt($('#sg-total-pages').value, 10)  || DEFAULT_EXAM_CONFIG.totalPages,
+      wordsPerPage:    parseInt($('#sg-words-page').value, 10)   || DEFAULT_EXAM_CONFIG.wordsPerPage,
+      startFromPage:   parseInt($('#sg-start-page').value, 10)   || 1,
+      minLinesPerPara: parseInt($('#sg-min-lines').value, 10)    || DEFAULT_EXAM_CONFIG.minLinesPerPara,
+      maxLinesPerPara: parseInt($('#sg-max-lines').value, 10)    || DEFAULT_EXAM_CONFIG.maxLinesPerPara,
+    };
+    if (!examConfig.examName) {
+      log('⚠ Exam Name is required.', 'warn');
+      return;
+    }
+    saveObj(STORAGE_KEYS.EXAM_CONFIG, examConfig);
+    progress.pagesTotal = examConfig.totalPages;
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    updateProgressUI();
+    log(`✔ Exam config saved — ${examConfig.examName}, ${examConfig.totalPages} pages.`, 'ok');
+    notify('Exam configuration saved!');
+  }
+
+  function saveImageConfig() {
+    imageConfig.maxWaitGeminiSec =
+      parseInt($('#sg-max-wait').value, 10) || DEFAULT_IMAGE_CONFIG.maxWaitGeminiSec;
+    saveObj(STORAGE_KEYS.IMAGE_CONFIG, imageConfig);
+    log('✔ Image config saved.', 'ok');
+    notify('Image configuration saved!');
+  }
+
+  function saveRefConfig() {
+    refConfig.reminderEveryPages =
+      parseInt($('#sg-remind-every').value, 10) || DEFAULT_REF_CONFIG.reminderEveryPages;
+    saveObj(STORAGE_KEYS.REF_CONFIG, refConfig);
+    log('✔ Reference config saved.', 'ok');
+    notify('Reference configuration saved!');
+  }
+
+  function saveDocsConfig() {
+    const url   = $('#sg-apps-script-url').value.trim();
+    const docId = $('#sg-doc-id').value.trim();
+    GM_setValue(STORAGE_KEYS.APPS_SCRIPT_URL, url);
+    GM_setValue(STORAGE_KEYS.DOC_ID, docId);
+    log('✔ Google Docs connection saved.', 'ok');
+    notify('Docs connection saved!');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  WORKFLOW STEPS
+  // ─────────────────────────────────────────────────────────────
+  function openGPTForUpload(kind) {
+    const host = window.location.hostname;
+    if (host.includes('chatgpt') || host.includes('openai')) {
+      log(`📎 Opening GPT upload dialog for ${kind}...`, 'info');
+      // Focus the "+" attach button if present
+      const plusBtn = document.querySelector(
+        'button[aria-label*="Attach"], button[aria-label*="upload"], button[data-testid="attachments-menu-button"]'
+      );
+      if (plusBtn) {
+        plusBtn.click();
+        log('✔ GPT attach menu opened. Select your file.', 'ok');
+      } else {
+        log('⚠ Attach button not found — scroll to ChatGPT input and click the "+" manually.', 'warn');
+      }
+    } else {
+      log('ℹ Open ChatGPT in a new tab and use the "+" to upload.', 'info');
+      GM_openInTab('https://chatgpt.com/', { active: true });
+    }
+  }
+
+  function confirmUpload(kind) {
+    if (kind === 'outline') {
+      workflow.outlineUploaded = true;
+      log('✔ Outline confirmed. Attempting auto-detect of domains...', 'ok');
+      applyWorkflowUI();
+      saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+      autoDetectDomains();
+    } else if (kind === 'books') {
+      workflow.booksUploaded = true;
+      log('✔ Reference books confirmed.', 'ok');
+      applyWorkflowUI();
+      saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  AUTO-DETECT DOMAINS (via GPT)
+  // ─────────────────────────────────────────────────────────────
+  async function autoDetectDomains() {
+    if (!isOnGPT()) {
+      log('⚠ Auto-detect runs on ChatGPT. Please run from chatgpt.com.', 'warn');
+      return;
+    }
+    log('🔍 Asking GPT to extract domains + weights from the uploaded outline...', 'info');
+    const prompt = `From the exam outline I just uploaded, extract ALL domains and their official weight percentages.
+Return STRICT JSON ONLY in this shape — no prose, no commentary:
+{
+  "domains": [
+    { "name": "DOMAIN NAME", "weight": 20 }
+  ]
+}
+Rules:
+- Weights MUST sum to 100.
+- Use the exact domain names from the outline.
+- If a domain has no explicit weight, estimate proportionally from sub-topic counts.`;
+
+    try {
+      const raw = await sendToGPT(prompt);
+      const data = extractJSON(raw);
+      const list = Array.isArray(data.domains) ? data.domains : [];
+      if (!list.length) {
+        log('⚠ GPT returned no domains. Add them manually.', 'warn');
+        return;
+      }
+      domains = list.map(d => ({
+        name:   String(d.name || '').trim(),
+        weight: parseFloat(d.weight) || 0,
+      })).filter(d => d.name);
+      saveObj(STORAGE_KEYS.DOMAINS, domains);
+      renderDomains();
+      log(`✔ Auto-detected ${domains.length} domains.`, 'ok');
+      notify(`Detected ${domains.length} domains from outline.`);
+    } catch (err) {
+      log(`✗ Auto-detect failed: ${err.message}`, 'error');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  AUTO GENERATE (Text + Images pipeline)
+  // ─────────────────────────────────────────────────────────────
+  async function autoGenerate() {
+    if (!examConfig.examName) {
+      log('⚠ Set Exam Name first.', 'warn');
+      return;
+    }
+    if (!workflow.outlineUploaded) {
+      log('⚠ Upload + confirm outline first.', 'warn');
+      return;
+    }
+    if (!workflow.booksUploaded) {
+      log('⚠ Upload + confirm reference books first.', 'warn');
+      return;
+    }
+    if (!domains.length) {
+      log('⚠ No domains detected. Click "Auto-Detect Now".', 'warn');
+      return;
+    }
+    await startGeneration();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  GENERATION PIPELINE
+  // ─────────────────────────────────────────────────────────────
+  async function startGeneration() {
+    if (currentState === STATE.RUNNING) return;
+
+    abortFlag = false;
+    pauseFlag = false;
+    skipFlag  = false;
+
+    setUIState(STATE.RUNNING);
+    log('▶ Starting generation...', 'info');
+
+    // Reset page counters only if starting fresh
+    if (progress.currentPage < examConfig.startFromPage) {
+      progress.currentPage = examConfig.startFromPage;
+    }
+    progress.pagesTotal = examConfig.totalPages;
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    updateProgressUI();
+
+    const endPage = examConfig.totalPages;
+    for (let page = progress.currentPage; page <= endPage; page++) {
+      if (abortFlag) { log('⏹ Stopped.', 'warn'); break; }
+
+      while (pauseFlag) {
+        await sleep(500);
+        if (abortFlag) break;
+      }
+      if (abortFlag) break;
+
+      progress.currentPage = page;
+      saveObj(STORAGE_KEYS.PROGRESS, progress);
+      updateProgressUI();
+
+      // Reference reminder every N pages
+      if (refConfig.reminderEveryPages > 0 &&
+          ((page - examConfig.startFromPage) % refConfig.reminderEveryPages === 0)) {
+        await sendReferenceReminder();
+      }
+
+      try {
+        log(`📄 Page ${page}/${endPage} — generating text...`, 'info');
+        const text = await generatePageText(page);
+
+        if (refConfig.autoStopOnMissing && detectMissingReference(text)) {
+          log('⚠ GPT response indicates missing reference. Showing upload popup.', 'warn');
+          showPopup('⚠ Missing Reference',
+            `GPT could not find required content for page ${page}. ` +
+            `Upload the missing reference PDF or skip this page.`);
+          setUIState(STATE.PAUSED);
+          while (pauseFlag || currentState === STATE.PAUSED) {
+            await sleep(400);
+            if (abortFlag || skipFlag) break;
+          }
+          if (skipFlag) { skipFlag = false; continue; }
+          if (abortFlag) break;
+        }
+
+        if (refConfig.validateQuality && !validateQuality(text)) {
+          log('↺ Quality validation failed — retrying page.', 'warn');
+          progress.retries++;
+          saveObj(STORAGE_KEYS.PROGRESS, progress);
+          updateProgressUI();
+          page--; // retry
+          continue;
+        }
+
+        let cleaned = text;
+        if (refConfig.stripSourceMentions) cleaned = stripSourceMentions(cleaned);
+
+        const wordCount = countWords(cleaned);
+
+        // Generate images via Gemini if enabled
+        let images = [];
+        if (imageConfig.enableGemini && shouldGenerateImages(cleaned)) {
+          log(`🖼 Generating Gemini images for page ${page}...`, 'img');
+          try {
+            images = await generateGeminiImagesForPage(cleaned, page);
+            progress.images += images.length;
+            log(`✔ Captured ${images.length} image(s) from Gemini.`, 'img');
+          } catch (err) {
+            log(`⚠ Gemini image step failed: ${err.message}`, 'warn');
+          }
+        }
+
+        // Post to Google Doc
+        await postPageToDoc({ page, text: cleaned, images, wordCount });
+
+        progress.done++;
+        progress.words += wordCount;
+        pushRecent(page, 'ok', `${wordCount}w · ${images.length}🖼`);
+        log(`✔ Page ${page} done (${wordCount} words, ${images.length} images).`, 'ok');
+      } catch (err) {
+        progress.failed++;
+        pushRecent(page, 'fail', err.message);
+        log(`✗ Page ${page} failed: ${err.message}`, 'error');
+      }
+
+      saveObj(STORAGE_KEYS.PROGRESS, progress);
+      updateProgressUI();
+      await sleep(800);
+    }
+
+    if (!abortFlag) {
+      setUIState(STATE.IDLE);
+      log('🎉 Generation complete!', 'ok');
+      notify('StudyGuide generation complete!');
+    }
+  }
+
+  function pauseGeneration() {
+    pauseFlag = true;
+    setUIState(STATE.PAUSED);
+    log('⏸ Paused.', 'warn');
+  }
+
+  function resumeGeneration() {
+    pauseFlag = false;
+    setUIState(STATE.RUNNING);
+    log('▶ Resumed.', 'info');
+  }
+
+  function stopGeneration() {
+    abortFlag = true;
+    pauseFlag = false;
+    setUIState(STATE.STOPPED);
+    log('⏹ Stopped.', 'warn');
+  }
+
+  function retryPage() {
+    abortFlag = false;
+    pauseFlag = false;
+    progress.retries++;
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    updateProgressUI();
+    log(`↺ Retrying page ${progress.currentPage}...`, 'info');
+    // The running loop will re-enter; if not running, start fresh from current page.
+    if (currentState !== STATE.RUNNING) startGeneration();
+  }
+
+  function skipPage() {
+    skipFlag = true;
+    pauseFlag = false;
+    progress.skipped++;
+    pushRecent(progress.currentPage, 'skip', 'skipped by user');
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    updateProgressUI();
+    log(`⏭ Skipped page ${progress.currentPage}.`, 'warn');
+    if (currentState === STATE.PAUSED) setUIState(STATE.RUNNING);
+  }
+
+  function resetEverything() {
+    if (!confirm('Reset ALL progress and saved data? This cannot be undone.')) return;
+    abortFlag = true;
+    pauseFlag = false;
+    progress = { ...DEFAULT_PROGRESS };
+    workflow = { ...DEFAULT_WORKFLOW };
+    domains  = [];
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+    saveObj(STORAGE_KEYS.DOMAINS,  domains);
+    applyWorkflowUI();
+    renderDomains();
+    updateProgressUI();
+    $('#sg-console').innerHTML = '';
+    setUIState(STATE.IDLE);
+    log('🗑 Reset complete.', 'warn');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  GPT: PAGE TEXT GENERATION
+  // ─────────────────────────────────────────────────────────────
+  async function generatePageText(pageNum) {
+    const headingRule = (pageNum === examConfig.startFromPage)
+      ? 'Include domain (#) and subdomain (##) headings on this FIRST page only.'
+      : 'Do NOT repeat domain/subdomain headings. Use only specific ###topic headings.';
+
+    const prompt = `You are generating page ${pageNum} of ${examConfig.totalPages} for the study guide of "${examConfig.examName}".
+
+STRICT v13 RULES (enforce all):
+- Use REFERENCE BOOKS ONLY. Zero training data. Zero fabrication.
+- If reference content is missing, output exactly: "MISSING_REFERENCE: <topic>".
+- ${headingRule}
+- Use ONLY specific ###topic headings — no generic names like "Introduction".
+- Each paragraph: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines.
+- Target ~${examConfig.wordsPerPage} words for this page.
+- Math/Physics: include REAL equations (not placeholders).
+- Chemistry: balanced reactions with state symbols (s, l, g, aq).
+- Code blocks: complete runnable examples with expected output.
+- Do NOT include source citations inline — just content.
+
+Produce the page now. Return plain text (markdown allowed).`;
+
+    return await sendToGPT(prompt);
+  }
+
+  async function sendReferenceReminder() {
+    if (!isOnGPT()) return;
+    log('🔒 Re-sending v13 reference rules...', 'sys');
+    const reminder = `REFERENCE REMINDER (v13): Continue using REFERENCE BOOKS ONLY. No training data.
+- Specific ###topic headings only (no generic names).
+- Math/Chemistry/Code must be real, balanced, and runnable.
+- If reference missing, output "MISSING_REFERENCE: <topic>".
+Acknowledge with "OK" and continue.`;
+    try {
+      await sendToGPT(reminder);
+    } catch (err) {
+      log(`⚠ Reminder failed: ${err.message}`, 'warn');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  GEMINI: IMAGE GENERATION (new tab per batch)
+  // ─────────────────────────────────────────────────────────────
+  function shouldGenerateImages(text) {
+    const s = text.toLowerCase();
+    const hasEquation = imageConfig.equationsAsImages && /\$\$|\\\[|\\begin\{|=\s*[-+]?\d/.test(text);
+    const hasChart    = imageConfig.generateCharts    && /(chart|graph|curve|bar\s+graph|supply|demand)/.test(s);
+    const hasDiagram  = imageConfig.generateDiagrams  && /(diagram|flowchart|anatomy|network|process\s+flow|circuit|structure)/.test(s);
+    return hasEquation || hasChart || hasDiagram;
+  }
+
+  async function generateGeminiImagesForPage(pageText, pageNum) {
+    // Build image prompts from page text
+    const imgPrompts = buildImagePrompts(pageText, pageNum);
+    if (!imgPrompts.length) return [];
+
+    const results = [];
+    for (const p of imgPrompts) {
+      if (abortFlag) break;
+      try {
+        const img = await runGeminiPrompt(p.prompt, p.label);
+        if (img) results.push({ label: p.label, dataUrl: img });
+      } catch (err) {
+        log(`⚠ Gemini image "${p.label}" failed: ${err.message}`, 'warn');
+      }
+    }
+    return results;
+  }
+
+  function buildImagePrompts(pageText, pageNum) {
+    const prompts = [];
+    const headings = (pageText.match(/###\s+([^\n]+)/g) || []).slice(0, 3);
+
+    headings.forEach((h, i) => {
+      const topic = h.replace(/^###\s+/, '').trim();
+      if (imageConfig.equationsAsImages && /\$\$|\\\[|\\begin\{/.test(pageText)) {
+        prompts.push({
+          label: `eq_${pageNum}_${i+1}`,
+          prompt: `Create a clean, high-resolution equation diagram for the topic "${topic}".
+Include real equations (LaTeX rendered). No text watermarks. White background. Educational style.`,
+        });
+      }
+      if (imageConfig.generateCharts && /(chart|graph|curve)/i.test(pageText)) {
+        prompts.push({
+          label: `chart_${pageNum}_${i+1}`,
+          prompt: `Create a professional chart/graph illustrating "${topic}" for ${examConfig.examName}.
+Labeled axes, legend, clean colors, educational textbook style.`,
+        });
+      }
+      if (imageConfig.generateDiagrams && /(diagram|anatomy|network|flow|circuit|structure)/i.test(pageText)) {
+        prompts.push({
+          label: `diag_${pageNum}_${i+1}`,
+          prompt: `Create a clear educational diagram for "${topic}" ( ${examConfig.examName} ).
+Label every part. Textbook quality. No watermarks.`,
+        });
+      }
+    });
+
+    return prompts;
+  }
+
+  async function runGeminiPrompt(prompt, label) {
+    // If we're already on gemini.google.com, run inline. Else open a new tab with a flag in storage.
+    if (window.location.hostname.includes('gemini.google.com')) {
+      return await sendToGeminiAndCapture(prompt);
+    }
+    // Cross-tab: open Gemini in a new tab with an instruction stored
+    log(`🌐 Opening Gemini in new tab for "${label}" — ensure you are logged in.`, 'img');
+    GM_setValue(`${APP_ID}_pendingGeminiPrompt`, { prompt, label, ts: Date.now() });
+    GM_openInTab(GEMINI_URL, { active: false, insert: true });
+    // Poll storage for result (captured by the Gemini-side userscript instance)
+    const timeoutMs = imageConfig.maxWaitGeminiSec * 1000;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (abortFlag) return null;
+      const result = GM_getValue(`${APP_ID}_geminiResult_${label}`, null);
+      if (result) {
+        GM_setValue(`${APP_ID}_geminiResult_${label}`, null);
+        return result;
+      }
+      await sleep(1500);
+    }
+    throw new Error('Gemini cross-tab timeout');
+  }
+
+  async function sendToGeminiAndCapture(prompt) {
+    const textarea = await waitForElement(
+      'rich-textarea .ql-editor, textarea[aria-label]',
+      15000
+    );
+    if (!textarea) throw new Error('Gemini input not found');
+
+    textarea.focus();
+    document.execCommand('selectAll', false, null);
+    document.execCommand('insertText', false, prompt);
+    await sleep(400);
+
+    const sendBtn = await waitForElement(
+      'button[aria-label*="Send"], button.send-button',
+      5000
+    );
+    if (sendBtn) (sendBtn.closest('button') || sendBtn).click();
+    else textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const timeoutMs = imageConfig.maxWaitGeminiSec * 1000;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (abortFlag) return null;
+      await sleep(1500);
+      const img = document.querySelector(
+        'img[alt*="Generated"], img[data-generated], .model-response-text img, message-content img'
+      );
+      if (img && img.src && img.complete && img.naturalWidth > 50) {
+        return await urlToDataUrl(img.src);
+      }
+    }
+    throw new Error('Gemini image timeout');
+  }
+
+  async function urlToDataUrl(url) {
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      return await new Promise((res) => {
+        const r = new FileReader();
+        r.onloadend = () => res(r.result);
+        r.readAsDataURL(blob);
+      });
+    } catch {
+      return url;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  GPT DOM INTERACTION
+  // ─────────────────────────────────────────────────────────────
+  function isOnGPT() {
+    const h = window.location.hostname;
+    return h.includes('chatgpt') || h.includes('openai');
+  }
+
+  async function sendToGPT(prompt) {
+    const textarea = await waitForElement(
+      'textarea[data-id="root"], #prompt-textarea, textarea[placeholder], div#prompt-textarea[contenteditable="true"]',
+      15000
+    );
+    if (!textarea) throw new Error('ChatGPT input not found');
+
+    // contenteditable vs textarea
+    if (textarea.tagName.toLowerCase() === 'textarea') {
+      setNativeValue(textarea, prompt);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      textarea.focus();
+      textarea.innerText = prompt;
+      textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }
+    await sleep(400);
+
+    const sendBtn = await waitForElement(
+      'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label*="Send"]',
+      5000
+    );
+    if (!sendBtn) throw new Error('Send button not found');
+    sendBtn.click();
+
+    return await waitForGPTResponse();
+  }
+
+  async function waitForGPTResponse(timeoutMs = 180000) {
+    const start = Date.now();
+    await sleep(2500);
+    return new Promise((resolve, reject) => {
+      const check = setInterval(() => {
+        if (abortFlag) { clearInterval(check); reject(new Error('Aborted')); return; }
+        if (Date.now() - start > timeoutMs) {
+          clearInterval(check);
+          reject(new Error('GPT response timeout'));
+          return;
+        }
+        const stopBtn = document.querySelector(
+          'button[aria-label="Stop generating"], button[data-testid="stop-button"]'
+        );
+        if (stopBtn) return;
+
+        const msgs = document.querySelectorAll(
+          '[data-message-author-role="assistant"], .markdown.prose, .prose'
+        );
+        if (msgs.length > 0) {
+          const last = msgs[msgs.length - 1];
+          const t = (last.innerText || last.textContent || '').trim();
+          if (t.length > 20) {
+            clearInterval(check);
+            resolve(t);
+          }
+        }
+      }, 1200);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  POST TO GOOGLE DOC (Apps Script)
+  // ─────────────────────────────────────────────────────────────
+  function postPageToDoc({ page, text, images, wordCount }) {
+    const url   = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
+    const docId = GM_getValue(STORAGE_KEYS.DOC_ID, '');
+    if (!url || !docId) {
+      log('⚠ Apps Script URL or Doc ID missing — page not posted.', 'warn');
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const payload = {
+        docId,
+        subject:    examConfig.examName,
+        pageNumber: page,
+        text,
+        images,
+        wordCount,
+        domains,
+        generatedAt: new Date().toISOString(),
+      };
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify(payload),
+        onload: (resp) => {
+          if (resp.status >= 200 && resp.status < 300) {
+            log(`📤 Page ${page} posted to Google Doc.`, 'sys');
+            resolve();
+          } else {
+            reject(new Error(`HTTP ${resp.status}`));
+          }
+        },
+        onerror: (e) => reject(new Error('Network error')),
+      });
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  QUALITY + REFERENCE VALIDATION
+  // ─────────────────────────────────────────────────────────────
+  function detectMissingReference(text) {
+    return /MISSING_REFERENCE\s*:/i.test(text) ||
+           /i\s+don'?t\s+have\s+access/i.test(text) ||
+           /i\s+cannot\s+find.*reference/i.test(text);
+  }
+
+  function validateQuality(text) {
+    if (!text || text.length < 200) return false;
+    // Forbidden patterns (training-data / placeholder / generic)
+    const forbidden = [
+      /\[placeholder\]/i,
+      /as an ai language model/i,
+      /lorem ipsum/i,
+      /<insert .* here>/i,
+      /\btodo\b:/i,
+    ];
+    return !forbidden.some(r => r.test(text));
+  }
+
+  function stripSourceMentions(text) {
+    return text
+      .replace(/\(see\s+[^)]+?(page|chapter)\s+\d+[^)]*\)/gi, '')
+      .replace(/\[source:[^\]]+\]/gi, '')
+      .replace(/according to the reference[^.]*\./gi, '')
+      .replace(/as stated in [^.]+\./gi, '')
+      .trim();
+  }
+
+  function countWords(text) {
+    return (text.trim().split(/\s+/).filter(Boolean) || []).length;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  PROGRESS UI
+  // ─────────────────────────────────────────────────────────────
+  function updateProgressUI() {
+    const total = progress.pagesTotal || examConfig.totalPages || 1;
+    const done  = Math.min(progress.done, total);
+    const pct   = Math.round((done / total) * 100);
+
+    $('#sg-progress-bar').style.width = `${pct}%`;
+    $('#sg-progress-pct').textContent = `${pct}%`;
+    $('#sg-progress-text').textContent = progress.message || (currentState === STATE.RUNNING
+      ? `Generating page ${progress.currentPage}/${total}...`
+      : 'Waiting to start...');
+    $('#sg-page-counter').textContent = `${done} / ${total} pages`;
+
+    $('#sg-stat-done').textContent    = progress.done;
+    $('#sg-stat-failed').textContent  = progress.failed;
+    $('#sg-stat-retries').textContent = progress.retries;
+    $('#sg-stat-words').textContent   = progress.words.toLocaleString();
+    $('#sg-stat-skipped').textContent = `⏭ ${progress.skipped}`;
+    $('#sg-stat-images').textContent  = `🖼 ${progress.images}`;
+
+    renderRecent();
+  }
+
+  function pushRecent(page, status, detail) {
+    progress.recent = progress.recent || [];
+    progress.recent.unshift({ page, status, detail, ts: new Date().toLocaleTimeString() });
+    progress.recent = progress.recent.slice(0, 12);
+  }
+
+  function renderRecent() {
+    const box = $('#sg-recent-pages');
+    if (!box) return;
+    if (!progress.recent || !progress.recent.length) {
+      box.innerHTML = `<div style="color:#475569">No pages generated yet.</div>`;
+      return;
+    }
+    const statusIcon = { ok: '✅', fail: '❌', skip: '⏭', retry: '↺' };
+    const statusColor = { ok: '#4ade80', fail: '#f87171', skip: '#94a3b8', retry: '#fbbf24' };
+    box.innerHTML = progress.recent.map(r => `
+      <div class="sg-recent-item">
+        <span><b>Page ${r.page}</b> <span style="color:#475569">· ${r.ts}</span></span>
+        <span class="sg-recent-status" style="color:${statusColor[r.status] || '#94a3b8'}">
+          ${statusIcon[r.status] || '•'} ${escapeHtml(r.detail || '')}
+        </span>
+      </div>
+    `).join('');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  UI STATE
+  // ─────────────────────────────────────────────────────────────
+  function setUIState(state) {
+    currentState = state;
+    const badge = $('#sg-status-badge');
+    badge.className = 'badge-' + state.toLowerCase();
+    badge.innerHTML = `<span class="badge-dot"></span>${state}`;
+
+    $('#sg-btn-start').disabled  = state === STATE.RUNNING || state === STATE.PAUSED;
+    $('#sg-btn-pause').disabled  = state !== STATE.RUNNING;
+    $('#sg-btn-resume').disabled = state !== STATE.PAUSED;
+    $('#sg-btn-stop').disabled   = state === STATE.IDLE || state === STATE.STOPPED;
+    $('#sg-btn-retry').disabled  = !(state === STATE.ERROR || state === STATE.PAUSED || state === STATE.STOPPED);
+    $('#sg-btn-skip').disabled   = !(state === STATE.RUNNING || state === STATE.PAUSED);
+    $('#sg-auto-generate').disabled = state === STATE.RUNNING;
+  }
+
+  function showPopup(title, body) {
+    $('#sg-popup-title').textContent = title;
+    $('#sg-popup-body').textContent  = body;
+    $('#sg-popup-overlay').style.display = 'flex';
+  }
+  function hidePopup() {
+    $('#sg-popup-overlay').style.display = 'none';
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  LOGGING
+  // ─────────────────────────────────────────────────────────────
+  function log(msg, type = 'info') {
+    const el = $('#sg-console');
+    if (!el) return;
+    const time = new Date().toLocaleTimeString();
+    const line = document.createElement('div');
+    line.className = `log-${type}`;
+    line.textContent = `[${time}] ${msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function notify(text) {
+    try {
+      GM_notification({ title: 'StudyGuide v13', text, timeout: 4000 });
+    } catch {/* ignore */}
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  UTILS
+  // ─────────────────────────────────────────────────────────────
+  function $(sel) { return document.querySelector(sel); }
+
+  function loadObj(key, fallback) {
+    try {
+      const raw = GM_getValue(key, null);
+      if (!raw) return JSON.parse(JSON.stringify(fallback));
+      return { ...JSON.parse(JSON.stringify(fallback)), ...JSON.parse(raw) };
+    } catch {
+      return JSON.parse(JSON.stringify(fallback));
+    }
+  }
+  function saveObj(key, obj) {
+    GM_setValue(key, JSON.stringify(obj));
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function waitForElement(selector, timeout = 10000) {
+    return new Promise((resolve) => {
+      const el = document.querySelector(selector);
+      if (el) return resolve(el);
+      const obs = new MutationObserver(() => {
+        const found = document.querySelector(selector);
+        if (found) { obs.disconnect(); resolve(found); }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => { obs.disconnect(); resolve(null); }, timeout);
+    });
+  }
+
+  function setNativeValue(el, value) {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+                || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(el, value); else el.value = value;
+  }
+
+  function extractJSON(text) {
+    if (!text) throw new Error('Empty AI response');
+    const m = text.match(/```json\s*([\s\S]*?)```/) ||
+              text.match(/```\s*([\s\S]*?)```/)   ||
+              text.match(/(\{[\s\S]*\})/);
+    if (m) {
+      try { return JSON.parse(m[1].trim()); } catch { /* fallthrough */ }
+    }
+    try { return JSON.parse(text.trim()); } catch { /* fallthrough */ }
+    return { raw: text };
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c =>
+      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+
+  // ─────────────────────────────────────────────────────────────
+  //  INIT
+  // ─────────────────────────────────────────────────────────────
+  function init() {
+    buildUI();
+    log('🟢 StudyGuide AI v13 loaded — Text + Gemini Images pipeline ready.', 'ok');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    setTimeout(init, 1200);
+  }
+})();
