@@ -1,7 +1,12 @@
 /**
- * StudyGuide AI Automation – Google Apps Script (Web App)
+ * StudyGuide AutoPilot v3.0 – Google Apps Script (Web App)
  *
  * Deploy as:  Execute as: Me  |  Who has access: Anyone
+ *
+ * Supports 3 actions:
+ *   ping        — connection test
+ *   append      — append text content to the doc
+ *   appendImage — append an image (base64 or URL) to the doc
  *
  * After deploying, copy the Web App URL into the
  * Tampermonkey panel's "App Script Web URL" field.
@@ -15,25 +20,182 @@ function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents);
     const docId   = payload.docId;
-    const subject = payload.subject || 'Unknown Subject';
-    const data    = payload.data    || {};
+    const secret  = payload.secret || '';
+    const action  = payload.action || 'append';
 
     if (!docId) return jsonResponse({ success: false, error: 'Missing docId' });
+
+    // ── PING ──────────────────────────────────────────────────
+    if (action === 'ping') {
+      return jsonResponse({ success: true, status: 'ok', message: 'StudyGuide AutoPilot Apps Script v3.0 is running.' });
+    }
 
     const doc  = DocumentApp.openById(docId);
     const body = doc.getBody();
 
-    // Clear existing content
-    body.clear();
+    // ── APPEND TEXT ──────────────────────────────────────────
+    if (action === 'append') {
+      const content = payload.content || '';
+      const section = payload.section || '';
+      if (!content && !section) { doc.saveAndClose(); return jsonResponse({ success: true, message: 'Empty content, skipped.' }); }
+      appendTextContent(body, section, content);
+      doc.saveAndClose();
+      return jsonResponse({ success: true, message: 'Content appended.' });
+    }
 
-    writeStudyGuide(body, subject, data, payload.generatedAt);
+    // ── APPEND IMAGE ─────────────────────────────────────────
+    if (action === 'appendImage') {
+      const section     = payload.section     || '';
+      const caption     = payload.imageCaption || 'Generated Diagram';
+      const imageData   = payload.imageData   || '';   // base64 data URL
+      const imageSrc    = payload.imageSrc    || '';   // fallback URL
+      const asciiArt    = payload.asciiArt    || '';
+
+      if (section) {
+        const p = body.appendParagraph(section);
+        p.setHeading(DocumentApp.ParagraphHeading.HEADING3);
+        p.setForegroundColor('#8b5cf6');
+      }
+
+      if (imageData && imageData.startsWith('data:')) {
+        // Decode base64 image and insert
+        try {
+          const base64 = imageData.split(',')[1];
+          const mimeType = imageData.match(/data:([^;]+)/)[1] || 'image/png';
+          const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType, caption + '.png');
+          const img = body.appendImage(blob);
+          img.setWidth(400);
+          // Caption
+          const capPara = body.appendParagraph(caption);
+          capPara.setHeading(DocumentApp.ParagraphHeading.NORMAL);
+          capPara.setItalic(true);
+          capPara.setForegroundColor('#6d28d9');
+        } catch(imgErr) {
+          // Fallback to ASCII
+          if (asciiArt) {
+            body.appendParagraph('[📊 ' + caption + ']').setHeading(DocumentApp.ParagraphHeading.NORMAL);
+            const codeP = body.appendParagraph(asciiArt);
+            codeP.setFontFamily('Courier New');
+            codeP.setFontSize(10);
+          }
+        }
+      } else if (asciiArt) {
+        // ASCII art fallback
+        body.appendParagraph('[📊 ' + caption + ']').setHeading(DocumentApp.ParagraphHeading.NORMAL);
+        const codeP = body.appendParagraph(asciiArt);
+        codeP.setFontFamily('Courier New');
+        codeP.setFontSize(10);
+      } else {
+        body.appendParagraph('[📊 FIGURE: ' + caption + ']').setItalic(true);
+      }
+
+      doc.saveAndClose();
+      return jsonResponse({ success: true, message: 'Image appended.' });
+    }
+
+    // ── LEGACY: full study guide write (v2 compat) ───────────
+    if (action === 'writeStudyGuide') {
+      const subject = payload.subject || 'Unknown Subject';
+      const data    = payload.data    || {};
+      body.clear();
+      writeStudyGuide(body, subject, data, payload.generatedAt);
+      doc.saveAndClose();
+      return jsonResponse({ success: true, message: 'Study guide written to document.' });
+    }
 
     doc.saveAndClose();
+    return jsonResponse({ success: false, error: 'Unknown action: ' + action });
 
-    return jsonResponse({ success: true, message: 'Study guide written to document.' });
   } catch (err) {
     return jsonResponse({ success: false, error: err.message });
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  APPEND TEXT CONTENT
+// ─────────────────────────────────────────────────────────────
+function appendTextContent(body, section, content) {
+  if (!content) return;
+
+  const lines = content.split('\n');
+  let inCodeBlock = false;
+  let codeLines = [];
+
+  function flushCode() {
+    if (codeLines.length > 0) {
+      const p = body.appendParagraph(codeLines.join('\n'));
+      p.setFontFamily('Courier New');
+      p.setFontSize(10);
+      p.setBackgroundColor('#f5f5f5');
+      codeLines = [];
+    }
+    inCodeBlock = false;
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine;
+
+    // Code fence
+    if (line.startsWith('```')) {
+      if (inCodeBlock) { flushCode(); }
+      else { inCodeBlock = true; }
+      continue;
+    }
+    if (inCodeBlock) { codeLines.push(line); continue; }
+
+    // Heading detection
+    if (line.startsWith('#### ')) {
+      const p = body.appendParagraph(line.replace(/^#{4}\s+/, ''));
+      p.setHeading(DocumentApp.ParagraphHeading.HEADING4);
+    } else if (line.startsWith('### ')) {
+      const p = body.appendParagraph(line.replace(/^#{3}\s+/, ''));
+      p.setHeading(DocumentApp.ParagraphHeading.HEADING3);
+      p.setForegroundColor('#1a73e8');
+    } else if (line.startsWith('## ')) {
+      const p = body.appendParagraph(line.replace(/^#{2}\s+/, ''));
+      p.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      p.setForegroundColor('#0d47a1');
+    } else if (line.startsWith('# ')) {
+      const p = body.appendParagraph(line.replace(/^#\s+/, ''));
+      p.setHeading(DocumentApp.ParagraphHeading.HEADING1);
+      p.setForegroundColor('#0d47a1');
+      p.setBold(true);
+    } else if (line.startsWith('| ') && line.includes('|')) {
+      // Table row — skip separator rows
+      if (/^\|[\s\-|]+\|$/.test(line.trim())) continue;
+      const cells = line.split('|').filter((c, i) => i > 0 && i < line.split('|').length - 1).map(c => c.trim());
+      if (cells.length > 0) {
+        const tableRow = cells.join(' │ ');
+        const p = body.appendParagraph(tableRow);
+        p.setFontFamily('Courier New');
+        p.setFontSize(10);
+      }
+    } else if (line.startsWith('- ') || line.startsWith('* ')) {
+      body.appendListItem(line.replace(/^[-*]\s+/, '')).setGlyphType(DocumentApp.GlyphType.BULLET);
+    } else if (/^\d+\.\s+/.test(line)) {
+      body.appendListItem(line.replace(/^\d+\.\s+/, '')).setGlyphType(DocumentApp.GlyphType.NUMBER);
+    } else if (line.trim() === '') {
+      body.appendParagraph('');
+    } else {
+      // Normal paragraph — handle inline **bold** and SOURCE: lines
+      const p = body.appendParagraph('');
+      p.setHeading(DocumentApp.ParagraphHeading.NORMAL);
+      if (line.startsWith('SOURCE:')) {
+        p.appendText(line).setItalic(true).setForegroundColor('#888888');
+      } else {
+        // Simple bold/italic inline handling
+        const parts = line.split(/(\*\*[^*]+\*\*)/);
+        for (const part of parts) {
+          if (part.startsWith('**') && part.endsWith('**')) {
+            p.appendText(part.slice(2, -2)).setBold(true);
+          } else {
+            p.appendText(part);
+          }
+        }
+      }
+    }
+  }
+  if (inCodeBlock) flushCode();
 }
 
 // Allow CORS pre-flight
