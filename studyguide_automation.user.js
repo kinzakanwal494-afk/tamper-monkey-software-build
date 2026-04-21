@@ -108,6 +108,7 @@
   const DEFAULT_WORKFLOW = {
     outlineUploaded: false,
     booksUploaded:   false,
+    samplesUploaded: false,
   };
 
   const DEFAULT_PROGRESS = {
@@ -993,6 +994,18 @@
               <button class="sg-step-btn" id="sg-confirm-books">✓ Confirm Books</button>
             </div>
           </div>
+
+          <div class="sg-step-card">
+            <div class="sg-step-title">3️⃣ Upload Sample Questions</div>
+            <div class="sg-step-sub">
+              Upload sample-question PDFs / references to GPT, then confirm. Used for
+              sample-question mapping and practice-question style.
+            </div>
+            <div class="sg-step-actions">
+              <button class="sg-step-btn primary" id="sg-open-samples">❓ Open GPT Upload</button>
+              <button class="sg-step-btn" id="sg-confirm-samples">✓ Confirm Samples</button>
+            </div>
+          </div>
         </div>
 
         <!-- 6. AUTO GENERATE -->
@@ -1137,10 +1150,13 @@
   function applyWorkflowUI() {
     const b1 = $('#sg-confirm-outline');
     const b2 = $('#sg-confirm-books');
+    const b3 = $('#sg-confirm-samples');
     if (b1) b1.classList.toggle('confirmed', workflow.outlineUploaded);
     if (b2) b2.classList.toggle('confirmed', workflow.booksUploaded);
+    if (b3) b3.classList.toggle('confirmed', workflow.samplesUploaded);
     if (b1) b1.textContent = workflow.outlineUploaded ? '✔ Outline Confirmed' : '✓ Confirm Outline';
     if (b2) b2.textContent = workflow.booksUploaded   ? '✔ Books Confirmed'   : '✓ Confirm Books';
+    if (b3) b3.textContent = workflow.samplesUploaded ? '✔ Samples Confirmed' : '✓ Confirm Samples';
   }
 
   function setToggle(id, on) {
@@ -1302,6 +1318,8 @@
     $('#sg-confirm-outline').addEventListener('click', () => confirmUpload('outline'));
     $('#sg-open-books').addEventListener('click', () => openGPTForUpload('books'));
     $('#sg-confirm-books').addEventListener('click', () => confirmUpload('books'));
+    $('#sg-open-samples').addEventListener('click', () => openGPTForUpload('samples'));
+    $('#sg-confirm-samples').addEventListener('click', () => confirmUpload('samples'));
 
     // Auto-generate + controls
     $('#sg-auto-generate').addEventListener('click', autoGenerate);
@@ -1527,6 +1545,12 @@ Return STRICT JSON ONLY in this shape, no prose:
       log('✔ Reference books confirmed.', 'ok');
       applyWorkflowUI();
       saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+    } else if (kind === 'samples') {
+      workflow.samplesUploaded = true;
+      log('✔ Sample questions confirmed. Re-running sample question mapping detection...', 'ok');
+      applyWorkflowUI();
+      saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+      await autoDetectSampleMapping();
     }
   }
 
