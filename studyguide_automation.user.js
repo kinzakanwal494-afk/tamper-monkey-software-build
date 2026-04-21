@@ -673,6 +673,30 @@
     .log-img   { color: #c084fc; }
     .log-sys   { color: #94a3b8; font-style: italic; }
 
+    /* Step notification banner */
+    #sg-step-notify {
+      background: linear-gradient(135deg, #78350f, #b45309);
+      border: 1px solid #f59e0b;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #fef3c7;
+      font-size: 12px;
+      font-weight: 600;
+      display: none;
+      line-height: 1.4;
+      animation: sg-blink 1.6s ease-in-out infinite;
+    }
+    #sg-step-notify .sg-notify-title {
+      display: block;
+      font-size: 13px;
+      color: #fff;
+      margin-bottom: 2px;
+    }
+    @keyframes sg-blink {
+      0%,100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.0); }
+      50%     { box-shadow: 0 0 0 4px rgba(245,158,11,0.35); }
+    }
+
     /* Upload / Skip popup */
     #sg-popup-overlay {
       position: fixed;
@@ -718,6 +742,16 @@
   let abortFlag    = false;
   let pauseFlag    = false;
   let skipFlag     = false;
+
+  // Confirmation resolvers — startGeneration awaits these when it needs
+  // the user to do something in ChatGPT (upload outline / samples / books).
+  const pendingConfirm = {
+    outline:  null,
+    samples:  null,
+    books:    null,
+    newBook:  null,
+  };
+  let subjectRulesAcknowledged = false;
   let examConfig     = loadObj(STORAGE_KEYS.EXAM_CONFIG,     DEFAULT_EXAM_CONFIG);
   let imageConfig    = loadObj(STORAGE_KEYS.IMAGE_CONFIG,    DEFAULT_IMAGE_CONFIG);
   let refConfig      = loadObj(STORAGE_KEYS.REF_CONFIG,      DEFAULT_REF_CONFIG);
@@ -1010,6 +1044,10 @@
 
         <!-- 6. AUTO GENERATE -->
         <div class="sg-section">
+          <div id="sg-step-notify">
+            <span class="sg-notify-title">🔔 Action Required</span>
+            <span id="sg-step-notify-msg">Waiting...</span>
+          </div>
           <button id="sg-auto-generate">
             ⚡ Auto Generate — Text + Images
             <span class="sg-subline">
@@ -1091,6 +1129,21 @@
           <div class="sg-popup-btns">
             <button class="sg-step-btn primary" id="sg-popup-upload">📎 Upload Reference</button>
             <button class="sg-step-btn" id="sg-popup-skip">⏭ Skip Page</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Missing-book popup (from reference verification) -->
+      <div id="sg-book-popup-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.72);display:none;align-items:center;justify-content:center;z-index:2147483646">
+        <div style="background:#0b1220;border:1px solid #f59e0b;border-radius:12px;padding:22px;width:460px;max-width:90vw;color:#e2e8f0;box-shadow:0 25px 60px rgba(0,0,0,0.8)">
+          <h3 style="margin:0 0 10px 0;color:#fbbf24;font-size:16px">⚠ Missing Book / Data Detected</h3>
+          <p id="sg-book-popup-body" style="font-size:12px;color:#cbd5e1;line-height:1.5;margin-bottom:14px">
+            GPT reports missing reference data for some domains / subdomains.
+            Upload the missing book, then click "Confirm New Book" to continue.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <button class="sg-step-btn primary" id="sg-book-popup-add">📎 Add New Book</button>
+            <button class="sg-step-btn" id="sg-book-popup-confirm">✓ Confirm New Book</button>
           </div>
         </div>
       </div>
@@ -1347,6 +1400,16 @@
       hidePopup();
       skipPage();
     });
+
+    // Book popup
+    $('#sg-book-popup-add').addEventListener('click', () => {
+      openGPTForUpload('new-book');
+    });
+    $('#sg-book-popup-confirm').addEventListener('click', () => {
+      if (pendingConfirm.newBook) { pendingConfirm.newBook(); pendingConfirm.newBook = null; }
+      hideBookPopup();
+      log('✔ New book confirmed. Re-checking coverage...', 'ok');
+    });
   }
 
   function bindToggle(id, target, field, storageKey) {
@@ -1535,22 +1598,36 @@ Return STRICT JSON ONLY in this shape, no prose:
   async function confirmUpload(kind) {
     if (kind === 'outline') {
       workflow.outlineUploaded = true;
-      log('✔ Outline confirmed. Auto-detecting domains + sample mapping...', 'ok');
+      log('✔ Outline confirmed.', 'ok');
       applyWorkflowUI();
       saveObj(STORAGE_KEYS.WORKFLOW, workflow);
-      await autoDetectDomains();
-      await autoDetectSampleMapping();
+      hideStepNotify();
+      if (pendingConfirm.outline) {
+        pendingConfirm.outline(); pendingConfirm.outline = null;
+      } else {
+        // Manual (non-orchestrated) path: auto-detect inline
+        await autoDetectDomains();
+      }
     } else if (kind === 'books') {
       workflow.booksUploaded = true;
       log('✔ Reference books confirmed.', 'ok');
       applyWorkflowUI();
       saveObj(STORAGE_KEYS.WORKFLOW, workflow);
+      hideStepNotify();
+      if (pendingConfirm.books) {
+        pendingConfirm.books(); pendingConfirm.books = null;
+      }
     } else if (kind === 'samples') {
       workflow.samplesUploaded = true;
-      log('✔ Sample questions confirmed. Re-running sample question mapping detection...', 'ok');
+      log('✔ Sample questions confirmed.', 'ok');
       applyWorkflowUI();
       saveObj(STORAGE_KEYS.WORKFLOW, workflow);
-      await autoDetectSampleMapping();
+      hideStepNotify();
+      if (pendingConfirm.samples) {
+        pendingConfirm.samples(); pendingConfirm.samples = null;
+      } else {
+        await autoDetectSampleMapping();
+      }
     }
   }
 
@@ -1681,130 +1758,636 @@ Rules:
       log('⚠ Set Exam Name first.', 'warn');
       return;
     }
-    if (!workflow.outlineUploaded) {
-      log('⚠ Upload + confirm outline first.', 'warn');
-      return;
-    }
-    if (!workflow.booksUploaded) {
-      log('⚠ Upload + confirm reference books first.', 'warn');
-      return;
-    }
-    if (!domains.length) {
-      log('⚠ No domains detected. Click "Auto-Detect Now".', 'warn');
-      return;
-    }
     await startGeneration();
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  GENERATION PIPELINE
+  //  STEP NOTIFICATION (yellow banner + active confirm button)
+  // ─────────────────────────────────────────────────────────────
+  function showStepNotify(title, message) {
+    const box = $('#sg-step-notify');
+    const msg = $('#sg-step-notify-msg');
+    if (!box || !msg) return;
+    box.style.display = 'block';
+    msg.innerHTML = `<b>${escapeHtml(title)}</b><br>${escapeHtml(message)}`;
+  }
+  function hideStepNotify() {
+    const box = $('#sg-step-notify');
+    if (box) box.style.display = 'none';
+  }
+
+  function waitForConfirm(kind) {
+    return new Promise((resolve) => { pendingConfirm[kind] = resolve; });
+  }
+
+  function showBookPopup(missingList) {
+    const overlay = $('#sg-book-popup-overlay');
+    const body    = $('#sg-book-popup-body');
+    if (!overlay || !body) return Promise.resolve();
+    const listHtml = (missingList && missingList.length)
+      ? `<br><br><b>Missing:</b><br>• ${missingList.map(escapeHtml).join('<br>• ')}`
+      : '';
+    body.innerHTML = `GPT reports missing reference data. Upload the missing book, then click "Confirm New Book" to continue.${listHtml}`;
+    overlay.style.display = 'flex';
+    return new Promise((resolve) => { pendingConfirm.newBook = resolve; });
+  }
+  function hideBookPopup() {
+    const overlay = $('#sg-book-popup-overlay');
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  MASTER RULES (the v13 absolute-structure command)
+  // ─────────────────────────────────────────────────────────────
+  function buildMasterRules() {
+    const cfg = {
+      pages: examConfig.totalPages,
+      words: examConfig.wordsPerPage,
+      minL:  examConfig.minLinesPerPara,
+      maxL:  examConfig.maxLinesPerPara,
+    };
+    const subjectRules = ''; // reserved for subject-specific extra rules (future)
+    return `You are the StudyGuide AI — exam "${examConfig.examName}".
+
+ABSOLUTE STRUCTURE FORMAT — USE EXACT SYMBOLS, ZERO EXCEPTIONS:
+  #Domain-N: Domain Name       → ALWAYS start with # symbol. Written ONLY on FIRST page of domain. NEVER repeat.
+  ##Subdomain-N.M: Name        → ALWAYS start with ## symbols. Written ONLY on FIRST page of subdomain. NEVER repeat.
+  ###Specific Topic Heading    → ALWAYS start with ### symbols. Every topic heading on every page MUST begin with ###.
+
+HEADING SYMBOL RULES — CRITICAL:
+• NEVER write a domain name without # prefix
+• NEVER write a subdomain name without ## prefix
+• NEVER write a topic heading without ### prefix
+• NEVER use bold (**text**) as a substitute for ### headings
+• NEVER write headings as plain text without # symbols
+• EVERY section heading = ### prefix. No exceptions. Ever.
+
+CONTENT LAW — zero exceptions:
+1. Source ONLY from uploaded reference books — zero general knowledge, zero training data
+2. No author mentions, no student/reader references, no "this chapter/book/section" mentions
+3. Write pure technical knowledge — define, explain, describe mechanisms directly
+4. ~${cfg.words} words per page. Every paragraph: ${cfg.minL}–${cfg.maxL} lines
+5. Tables → | col | col | markdown — ONLY when reference contains actual tables
+6. Last line every page: SOURCE: Book Title | Chapter: name | Pages: range
+7. NO MCQs, no exercises, no "test yourself" sections
+8. If content not in any reference book → REFERENCE_NOT_FOUND: [topic]
+${subjectRules}
+Total pages: ${cfg.pages} | Words/page: ~${cfg.words} | Para lines: ${cfg.minL}–${cfg.maxL}
+Do NOT generate anything yet. Reply ONLY: RULES ACKNOWLEDGED — READY FOR OUTLINE`;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  MASTER ORCHESTRATOR — this is what "Start Generation" runs
   // ─────────────────────────────────────────────────────────────
   async function startGeneration() {
     if (currentState === STATE.RUNNING) return;
 
+    // Guards
+    if (!examConfig.examName)           { log('⚠ Set Exam Name first.', 'warn'); return; }
+    if (!GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '') ||
+        !GM_getValue(STORAGE_KEYS.DOC_ID, ''))
+                                        { log('⚠ Save Apps Script URL + Doc ID first.', 'warn'); return; }
+    if (!isOnGPT())                     { log('⚠ Open chatgpt.com — the orchestrator drives ChatGPT.', 'warn'); return; }
+
     abortFlag = false;
     pauseFlag = false;
     skipFlag  = false;
+    subjectRulesAcknowledged = false;
 
     setUIState(STATE.RUNNING);
-    log('▶ Starting generation...', 'info');
+    log(`▶ Starting full generation pipeline for "${examConfig.examName}"...`, 'info');
 
-    // Reset page counters only if starting fresh
-    if (progress.currentPage < examConfig.startFromPage) {
-      progress.currentPage = examConfig.startFromPage;
+    try {
+      // 1) Inject master rules, wait for acknowledgement
+      log('📜 Injecting master rules into GPT...', 'info');
+      const ackResp = await sendToGPT(buildMasterRules());
+      if (!/RULES\s+ACKNOWLEDGED/i.test(ackResp)) {
+        log('⚠ GPT did not acknowledge rules verbatim, continuing anyway.', 'warn');
+      } else {
+        log('✔ GPT acknowledged rules.', 'ok');
+      }
+      subjectRulesAcknowledged = true;
+
+      // 2) Ask user to upload outline
+      showStepNotify('Upload Exam Outline', 'Open ChatGPT + button, upload the outline PDF, then click "✓ Confirm Outline" in the Workflow section.');
+      notify('Upload exam outline to ChatGPT now.');
+      log('⏸ Waiting for outline upload + confirmation...', 'warn');
+      await waitForConfirm('outline');
+      if (abortFlag) throw new Error('Aborted');
+
+      // 3) Ask GPT to confirm outline + emit domain mapping in strict format
+      log('🗺 Requesting strict domain + subdomain mapping...', 'info');
+      const mappingPrompt = `Step 1: Confirm you have read the outline I just uploaded. Start your reply with exactly:
+OUTLINE_CONFIRMED
+
+Step 2: On new lines output the OFFICIAL domain + subdomain mapping with official exam weights.
+Use this EXACT format — no extra text, no commentary, no intro, no outro:
+
+Domain-1:<domain name>
+Subdomain-1.1:<subdomain name>    <weight%>
+Subdomain-1.2:<subdomain name>    <weight%>
+Domain-2:<domain name>
+Subdomain-2.1:<subdomain name>    <weight%>
+...
+
+Rules:
+- Zero extra text.
+- Weights MUST sum to 100 overall.
+- Use official exam weights from the outline I uploaded.
+- Four spaces between subdomain name and its weight percent.`;
+
+      const mappingResp = await sendToGPT(mappingPrompt);
+      if (!/OUTLINE_CONFIRMED/i.test(mappingResp)) {
+        log('⚠ GPT did not confirm outline. Continuing with parse attempt.', 'warn');
+      }
+      const parsed = parseDomainMapping(mappingResp);
+      if (!parsed.domains.length) {
+        throw new Error('Could not parse any domains from GPT mapping response.');
+      }
+      domains = parsed.domains; // [{name, weight, subdomains:[{name,weight}]}]
+      saveObj(STORAGE_KEYS.DOMAINS, domains);
+      renderDomains();
+      log(`✔ Parsed ${domains.length} domain(s), ${parsed.totalSub} subdomain(s).`, 'ok');
+
+      // 4) Upload sample questions
+      showStepNotify('Upload Sample Questions', 'Upload sample-question PDFs to ChatGPT, then click "✓ Confirm Samples".');
+      notify('Upload sample-question PDFs to ChatGPT now.');
+      log('⏸ Waiting for sample questions upload + confirmation...', 'warn');
+      await waitForConfirm('samples');
+      if (abortFlag) throw new Error('Aborted');
+
+      // 4a) Confirm samples + run mapping
+      log('🧩 Confirming samples + detecting sample mapping...', 'info');
+      await sendToGPT(`Confirm you have read the uploaded sample questions. Reply exactly:
+SAMPLES_CONFIRMED
+
+Then STOP — do not output anything else.`);
+      await autoDetectSampleMapping();
+
+      // 5) Upload reference books
+      showStepNotify('Upload Reference Books', 'Upload ALL reference book PDFs to ChatGPT, then click "✓ Confirm Books".');
+      notify('Upload reference books to ChatGPT now.');
+      log('⏸ Waiting for reference-book upload + confirmation...', 'warn');
+      await waitForConfirm('books');
+      if (abortFlag) throw new Error('Aborted');
+
+      // 6) Send list of uploaded books + verify coverage
+      log('📚 Asking GPT to list uploaded books and verify coverage...', 'info');
+      let verifyOK = false;
+      let verifyTries = 0;
+      while (!verifyOK && !abortFlag) {
+        verifyTries++;
+        const verifyResp = await sendToGPT(`List every reference book you currently have access to (title + author if possible).
+Then cross-check EVERY domain and subdomain from the mapping above and say for each whether the reference data is:
+  COMPLETE | PARTIAL | MISSING
+
+Return STRICT JSON only:
+{
+  "books": ["Book 1", "Book 2"],
+  "coverage": [
+    {"domain": "Domain-1", "subdomain": "Subdomain-1.1", "status": "COMPLETE|PARTIAL|MISSING", "notes": ""}
+  ],
+  "missing_any": true|false
+}`);
+        const verifyData = extractJSON(verifyResp);
+        const missing = (verifyData.coverage || []).filter(c => (c.status || '').toUpperCase() === 'MISSING');
+        if (verifyData.missing_any === false || !missing.length) {
+          log(`✔ Coverage verified on attempt ${verifyTries}.`, 'ok');
+          verifyOK = true;
+        } else {
+          log(`⚠ ${missing.length} missing coverage item(s). Prompting for new book.`, 'warn');
+          showStepNotify('Missing Reference Data', `GPT reports ${missing.length} missing areas. Upload the missing book.`);
+          const list = missing.map(m => `${m.domain} / ${m.subdomain}${m.notes ? ' — ' + m.notes : ''}`);
+          await showBookPopup(list);
+          hideBookPopup();
+          if (abortFlag) throw new Error('Aborted');
+          // After user uploads, tell GPT to ingest
+          await sendToGPT(`A new reference book has been uploaded. Read it fully.
+Then re-check only the previously MISSING items. Reply STRICT JSON:
+{
+  "still_missing": [ {"domain":"","subdomain":"","notes":""} ]
+}`);
+        }
+      }
+
+      // 7) Per-domain generation
+      for (let di = 0; di < domains.length; di++) {
+        if (abortFlag) break;
+        const d = domains[di];
+        const domainNum = di + 1;
+        log(`🎯 ===== DOMAIN ${domainNum}: ${d.name} =====`, 'info');
+
+        // Overview (2 pages × ~500 words)
+        await generateOverview(d, domainNum);
+        // Purpose (1 page × ~600 words)
+        await generatePurposePage(d, domainNum);
+        // Subdomain purpose table
+        await generateSubdomainTable(d, domainNum);
+        // Memory check table
+        await generateMemoryTable(d, domainNum);
+
+        // Subdomain by subdomain content + images
+        const subs = d.subdomains || [];
+        for (let si = 0; si < subs.length; si++) {
+          if (abortFlag) break;
+          const sub = subs[si];
+          const subNum = si + 1;
+          log(`📘 Subdomain ${domainNum}.${subNum}: ${sub.name}`, 'info');
+          await generateSubdomainContent(d, domainNum, sub, subNum, si === 0);
+        }
+
+        if (abortFlag) break;
+
+        // Practice questions for this domain
+        await generatePracticeQuestionsForDomain(d, domainNum);
+      }
+
+      if (!abortFlag) {
+        setUIState(STATE.IDLE);
+        log('🎉 Full generation pipeline complete!', 'ok');
+        notify('StudyGuide generation complete!');
+      }
+    } catch (err) {
+      setUIState(STATE.ERROR);
+      log(`✗ Orchestrator error: ${err.message}`, 'error');
     }
-    progress.pagesTotal = examConfig.totalPages;
-    saveObj(STORAGE_KEYS.PROGRESS, progress);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  DOMAIN-MAPPING PARSER (strict format)
+  // ─────────────────────────────────────────────────────────────
+  function parseDomainMapping(text) {
+    const out = { domains: [], totalSub: 0 };
+    const lines = text.split(/\r?\n/);
+    let currentDomain = null;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      const dMatch = line.match(/^Domain-(\d+)\s*:\s*(.+)$/i);
+      const sMatch = line.match(/^Subdomain-(\d+)\.(\d+)\s*:\s*(.+?)(?:\s{2,}|\t+)(\d+(?:\.\d+)?)\s*%?$/i)
+                  || line.match(/^Subdomain-(\d+)\.(\d+)\s*:\s*(.+?)\s+(\d+(?:\.\d+)?)\s*%?$/i);
+      if (dMatch) {
+        currentDomain = { name: dMatch[2].trim(), weight: 0, subdomains: [] };
+        out.domains.push(currentDomain);
+      } else if (sMatch && currentDomain) {
+        const subName = sMatch[3].trim();
+        const weight  = parseFloat(sMatch[4]) || 0;
+        currentDomain.subdomains.push({ name: subName, weight });
+        currentDomain.weight += weight;
+        out.totalSub++;
+      } else if (/^Subdomain-/i.test(line) && currentDomain) {
+        // no weight specified
+        const bare = line.match(/^Subdomain-\d+\.\d+\s*:\s*(.+)$/i);
+        if (bare) {
+          currentDomain.subdomains.push({ name: bare[1].trim(), weight: 0 });
+          out.totalSub++;
+        }
+      }
+    }
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  CONTENT GENERATORS
+  // ─────────────────────────────────────────────────────────────
+  async function generateOverview(domain, domainNum) {
+    log(`📖 Overview for ${domain.name} (2 pages × 500 words)...`, 'info');
+    for (let p = 1; p <= 2; p++) {
+      if (abortFlag) return;
+      const headingBlock = (p === 1)
+        ? `#Domain-${domainNum}:${domain.name}
+${(domain.subdomains || []).map((s, i) => `##Subdomain-${domainNum}.${i+1}:${s.name}`).join('\n')}
+
+`
+        : '';
+      const prompt = `Overview page ${p} of 2 for Domain-${domainNum}: "${domain.name}".
+
+Rules:
+- Target exactly ~500 words.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each, with a clear example inside each paragraph.
+- Use ### headings only for sub-topics.
+- No bold substitutes for headings.
+- Reference-book sourced only.
+${p === 1
+  ? `- BEGIN the response with exactly this block (first page of domain):\n${headingBlock}`
+  : `- Continue the overview. Do NOT repeat #Domain / ##Subdomain headings.`}
+
+Reply with the page content only.`;
+      await runAndPostPage({
+        promptText: prompt,
+        label:      `overview_d${domainNum}_p${p}`,
+        allowImages:true,
+      });
+    }
+  }
+
+  async function generatePurposePage(domain, domainNum) {
+    log(`🎯 Main-purpose page for ${domain.name} (~600 words)...`, 'info');
+    const prompt = `Main purpose page for Domain-${domainNum}: "${domain.name}".
+- Target ~600 words on this single page.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines, each with an example.
+- Use only ### headings (no #, no ##).
+- Reference-book sourced only.
+Reply with the page content only.`;
+    await runAndPostPage({
+      promptText: prompt,
+      label:      `purpose_d${domainNum}`,
+      allowImages:true,
+    });
+  }
+
+  async function generateSubdomainTable(domain, domainNum) {
+    log(`📊 Subdomain purpose table for ${domain.name}...`, 'info');
+    const prompt = `Produce a single markdown table titled "###Subdomain Purpose Table" for Domain-${domainNum}: "${domain.name}".
+Columns: | # | Subdomain | Purpose |
+Include every subdomain of this domain (${(domain.subdomains || []).map(s => s.name).join(' | ')}).
+Purpose column: 1–2 sentences, reference-book sourced only.
+Return the markdown only.`;
+    await runAndPostPage({
+      promptText: prompt,
+      label:      `subtable_d${domainNum}`,
+      allowImages:false,
+    });
+  }
+
+  async function generateMemoryTable(domain, domainNum) {
+    log(`🧠 Memory-check table for ${domain.name}...`, 'info');
+    const prompt = `Produce a single markdown table titled "###Memory Check" for Domain-${domainNum}: "${domain.name}".
+Columns: | Term / Shortcut | 1-line definition |
+Include 8–15 of the most important shortcuts / key terms / mnemonics from this domain,
+one per row, each with a single-line definition from the reference books only.
+Return the markdown only.`;
+    await runAndPostPage({
+      promptText: prompt,
+      label:      `memtable_d${domainNum}`,
+      allowImages:false,
+    });
+  }
+
+  async function generateSubdomainContent(domain, domainNum, sub, subNum, isFirstSubOfDomain) {
+    const pagesForSub = Math.max(1, Math.round(((sub.weight || 0) / 100) * examConfig.totalPages));
+    log(`📄 Generating ${pagesForSub} page(s) for Subdomain-${domainNum}.${subNum}: ${sub.name}`, 'info');
+
+    for (let p = 1; p <= pagesForSub; p++) {
+      if (abortFlag) return;
+      const headingBlock = (p === 1)
+        ? `${isFirstSubOfDomain ? `#Domain-${domainNum}:${domain.name}\n` : ''}##Subdomain-${domainNum}.${subNum}:${sub.name}\n\n`
+        : '';
+      const prompt = `Content page ${p}/${pagesForSub} for Subdomain-${domainNum}.${subNum}: "${sub.name}" (of Domain-${domainNum}: "${domain.name}").
+
+- Target ~${examConfig.wordsPerPage} words.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines, each with a concrete example that fully conveys the concept to a student.
+- Use only ### headings for specific topics — NO generic names, NO repeats, NO bold substitutes.
+${p === 1
+  ? `- BEGIN the response with exactly this heading block:\n${headingBlock}`
+  : `- Continue. Do NOT repeat # or ## headings.`}
+- Reference-book sourced only.
+Reply with the page content only.`;
+      await runAndPostPage({
+        promptText: prompt,
+        label:      `d${domainNum}_s${subNum}_p${p}`,
+        allowImages:true,
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  PAGE RUNNER (send prompt, post, images, stats)
+  // ─────────────────────────────────────────────────────────────
+  async function runAndPostPage({ promptText, label, allowImages }) {
+    // Pause / abort support
+    while (pauseFlag) { await sleep(400); if (abortFlag) return; }
+    if (abortFlag) return;
+
+    progress.currentPage++;
     updateProgressUI();
 
-    const endPage = examConfig.totalPages;
-    for (let page = progress.currentPage; page <= endPage; page++) {
-      if (abortFlag) { log('⏹ Stopped.', 'warn'); break; }
+    // Reference reminder every N pages
+    if (refConfig.reminderEveryPages > 0 &&
+        progress.done > 0 &&
+        (progress.done % refConfig.reminderEveryPages === 0)) {
+      await sendReferenceReminder();
+    }
 
-      while (pauseFlag) {
-        await sleep(500);
+    try {
+      const raw = await sendToGPT(promptText);
+
+      if (refConfig.autoStopOnMissing && detectMissingReference(raw)) {
+        log(`⚠ Missing reference for ${label}. Showing popup.`, 'warn');
+        showPopup('⚠ Missing Reference',
+          `GPT could not find required content for ${label}. Upload the missing reference or skip this page.`);
+        setUIState(STATE.PAUSED);
+        while (pauseFlag || currentState === STATE.PAUSED) {
+          await sleep(400);
+          if (abortFlag || skipFlag) break;
+        }
+        hidePopup();
+        if (skipFlag) { skipFlag = false; progress.skipped++; updateProgressUI(); return; }
+        if (abortFlag) return;
+        setUIState(STATE.RUNNING);
+      }
+
+      let text = raw;
+      if (refConfig.validateQuality && !validateQuality(text)) {
+        log(`↺ Quality failed for ${label} — retrying once.`, 'warn');
+        progress.retries++;
+        updateProgressUI();
+        text = await sendToGPT(promptText + '\n\nRewrite the page — previous response failed quality rules.');
+      }
+      if (refConfig.stripSourceMentions) text = stripSourceMentions(text);
+
+      const wordCount = countWords(text);
+
+      // Ask GPT whether this page needs images
+      let images = [];
+      if (allowImages && imageConfig.enableGemini) {
+        images = await maybeGenerateImagesForPage(text, label);
+      }
+
+      await postPageToDoc({ page: progress.currentPage, text, images, wordCount, label });
+      progress.done++;
+      progress.words += wordCount;
+      if (images.length) progress.images += images.length;
+      pushRecent(progress.currentPage, 'ok', `${label} · ${wordCount}w · ${images.length}🖼`);
+      log(`✔ ${label} done (${wordCount}w, ${images.length} img).`, 'ok');
+    } catch (err) {
+      progress.failed++;
+      pushRecent(progress.currentPage, 'fail', `${label}: ${err.message}`);
+      log(`✗ ${label} failed: ${err.message}`, 'error');
+    }
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+    updateProgressUI();
+    await sleep(600);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  IMAGE CHECK — ask GPT if page needs images + detail prompts
+  // ─────────────────────────────────────────────────────────────
+  async function maybeGenerateImagesForPage(pageText, label) {
+    try {
+      const checkResp = await sendToGPT(`Analyse the page you just wrote for "${label}".
+Reply STRICT JSON only:
+{
+  "needs_image": true|false,
+  "prompts": [
+    {"title": "short title", "prompt": "one paragraph extremely detailed image generation prompt, textbook quality, labels, no watermarks"}
+  ]
+}
+Rules: Include an image prompt ONLY if the page truly requires a diagram / chart / anatomical figure / chemical structure / circuit diagram to be understood. Otherwise return needs_image:false with prompts:[].`);
+      const data = extractJSON(checkResp);
+      if (!data || !data.needs_image || !Array.isArray(data.prompts) || !data.prompts.length) {
+        return [];
+      }
+      log(`🖼 GPT requests ${data.prompts.length} image(s) for ${label}. Opening Gemini...`, 'img');
+
+      const results = [];
+      for (const p of data.prompts) {
         if (abortFlag) break;
+        try {
+          const img = await runGeminiPrompt(p.prompt, `${label}_${sanitizeLabel(p.title || 'img')}`);
+          if (img) results.push({ label: p.title || label, dataUrl: img });
+        } catch (err) {
+          log(`⚠ Gemini image "${p.title}" failed: ${err.message}`, 'warn');
+        }
       }
-      if (abortFlag) break;
+      return results;
+    } catch (err) {
+      log(`⚠ Image-check failed: ${err.message}`, 'warn');
+      return [];
+    }
+  }
 
-      progress.currentPage = page;
-      saveObj(STORAGE_KEYS.PROGRESS, progress);
-      updateProgressUI();
+  function sanitizeLabel(s) {
+    return String(s).replace(/[^a-z0-9_]+/gi, '_').slice(0, 40);
+  }
 
-      // Reference reminder every N pages
-      if (refConfig.reminderEveryPages > 0 &&
-          ((page - examConfig.startFromPage) % refConfig.reminderEveryPages === 0)) {
-        await sendReferenceReminder();
-      }
+  // ─────────────────────────────────────────────────────────────
+  //  PRACTICE QUESTIONS (per domain, weighted by sample mapping)
+  // ─────────────────────────────────────────────────────────────
+  async function generatePracticeQuestionsForDomain(domain, domainNum) {
+    const subCount   = (domain.subdomains || []).length;
+    const perSubRule = 10;                                  // 10 per subdomain baseline
+    const totalFromUI = practiceConfig.totalQuestions || 0;
+    // Distribute the UI total proportionally to domain weight if > 0, otherwise use perSubRule * subCount
+    let qForDomain;
+    if (totalFromUI > 0) {
+      const totalWeight = domains.reduce((s, d) => s + (d.weight || 0), 0) || 100;
+      qForDomain = Math.round((domain.weight / totalWeight) * totalFromUI);
+    } else {
+      qForDomain = perSubRule * subCount;
+    }
+    if (qForDomain <= 0) qForDomain = perSubRule * subCount;
+
+    const typeBreakdown = buildTypeBreakdown(qForDomain);
+    log(`🎓 Domain ${domainNum} — generating ${qForDomain} practice question(s): ${JSON.stringify(typeBreakdown)}`, 'info');
+
+    const batch = practiceConfig.perBatch || 10;
+    let produced = 0;
+    let batchIdx = 0;
+    while (produced < qForDomain && !abortFlag) {
+      const remaining = qForDomain - produced;
+      const thisBatch = Math.min(batch, remaining);
+      batchIdx++;
+      const prompt = `Generate ${thisBatch} practice question(s) for Domain-${domainNum}: "${domain.name}" using ONLY the reference books.
+
+Distribution across the FULL domain target (${qForDomain} total Qs): ${JSON.stringify(typeBreakdown)}.
+Options per MCQ: ${Math.max(2, parseInt(sampleMapping.optionsCount?.weight || 4, 10))}.
+Typical statement length (words): ${parseInt(sampleMapping.statementsLength?.weight || 25, 10)}.
+Explanation length: ${practiceConfig.explMinLength}–${practiceConfig.explMaxLength} words.
+
+Return STRICT JSON only:
+{
+  "questions": [
+    {
+      "id": 0,
+      "domain": "${domain.name}",
+      "subdomain": "",
+      "type": "scenario|definition|recall|application|fill_in_blank|chart_based",
+      "statement": "",
+      "options": {"A":"","B":"","C":"","D":""},
+      "correct_answer": "A",
+      "explanation": "",
+      "reference_topic": ""
+    }
+  ]
+}
+Rules:
+- Respect distribution across the WHOLE domain run (across batches).
+- Reference-book sourced only. No fabrication.
+- Spread questions evenly across the ${subCount} subdomain(s).`;
 
       try {
-        log(`📄 Page ${page}/${endPage} — generating text...`, 'info');
-        const text = await generatePageText(page);
+        const raw = await sendToGPT(prompt);
+        const data = extractJSON(raw);
+        const arr = Array.isArray(data.questions) ? data.questions : [];
+        if (!arr.length) throw new Error('No questions parsed');
 
-        if (refConfig.autoStopOnMissing && detectMissingReference(text)) {
-          log('⚠ GPT response indicates missing reference. Showing upload popup.', 'warn');
-          showPopup('⚠ Missing Reference',
-            `GPT could not find required content for page ${page}. ` +
-            `Upload the missing reference PDF or skip this page.`);
-          setUIState(STATE.PAUSED);
-          while (pauseFlag || currentState === STATE.PAUSED) {
-            await sleep(400);
-            if (abortFlag || skipFlag) break;
-          }
-          if (skipFlag) { skipFlag = false; continue; }
-          if (abortFlag) break;
-        }
-
-        if (refConfig.validateQuality && !validateQuality(text)) {
-          log('↺ Quality validation failed — retrying page.', 'warn');
-          progress.retries++;
-          saveObj(STORAGE_KEYS.PROGRESS, progress);
-          updateProgressUI();
-          page--; // retry
-          continue;
-        }
-
-        let cleaned = text;
-        if (refConfig.stripSourceMentions) cleaned = stripSourceMentions(cleaned);
-
-        const wordCount = countWords(cleaned);
-
-        // Generate images via Gemini if enabled
-        let images = [];
-        if (imageConfig.enableGemini && shouldGenerateImages(cleaned)) {
-          log(`🖼 Generating Gemini images for page ${page}...`, 'img');
-          try {
-            images = await generateGeminiImagesForPage(cleaned, page);
-            progress.images += images.length;
-            log(`✔ Captured ${images.length} image(s) from Gemini.`, 'img');
-          } catch (err) {
-            log(`⚠ Gemini image step failed: ${err.message}`, 'warn');
-          }
-        }
-
-        // Post to Google Doc
-        await postPageToDoc({ page, text: cleaned, images, wordCount });
-
-        progress.done++;
-        progress.words += wordCount;
-        pushRecent(page, 'ok', `${wordCount}w · ${images.length}🖼`);
-        log(`✔ Page ${page} done (${wordCount} words, ${images.length} images).`, 'ok');
+        await postQuestionsToDoc({
+          domain:    domain.name,
+          domainNum,
+          batchIdx,
+          questions: arr,
+        });
+        produced += arr.length;
+        progress.questions = (progress.questions || 0) + arr.length;
+        saveObj(STORAGE_KEYS.PROGRESS, progress);
+        updateProgressUI();
+        log(`✔ Practice batch ${batchIdx} → ${arr.length} Q (total ${produced}/${qForDomain}).`, 'ok');
       } catch (err) {
-        progress.failed++;
-        pushRecent(page, 'fail', err.message);
-        log(`✗ Page ${page} failed: ${err.message}`, 'error');
+        log(`✗ Practice batch ${batchIdx} failed: ${err.message}`, 'error');
+        break;
       }
-
-      saveObj(STORAGE_KEYS.PROGRESS, progress);
-      updateProgressUI();
-      await sleep(800);
+      await sleep(500);
     }
+  }
 
-    if (!abortFlag) {
-      setUIState(STATE.IDLE);
-      log('🎉 Generation complete!', 'ok');
-      notify('StudyGuide generation complete!');
+  function buildTypeBreakdown(totalQ) {
+    // Use sample-mapping % fields as the split; fallback to equal split.
+    const pctFields = ['scenarioBased','definitionType','recallStatement','applicationBased','fillInTheBlanks','chartsGraphsImg'];
+    const weights = {};
+    let sum = 0;
+    pctFields.forEach(k => {
+      const w = parseFloat(sampleMapping[k]?.weight) || 0;
+      weights[k] = w;
+      sum += w;
+    });
+    const breakdown = {};
+    if (sum > 0) {
+      pctFields.forEach(k => {
+        breakdown[k] = Math.round((weights[k] / sum) * totalQ);
+      });
+    } else {
+      const base = Math.floor(totalQ / pctFields.length);
+      pctFields.forEach((k, i) => { breakdown[k] = base + (i === 0 ? totalQ - base * pctFields.length : 0); });
     }
+    return breakdown;
+  }
+
+  function postQuestionsToDoc({ domain, domainNum, batchIdx, questions }) {
+    const url   = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
+    const docId = GM_getValue(STORAGE_KEYS.DOC_ID, '');
+    if (!url || !docId) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({
+          docId,
+          kind: 'practice_questions',
+          subject: examConfig.examName,
+          domain,
+          domainNum,
+          batchIdx,
+          questions,
+          generatedAt: new Date().toISOString(),
+        }),
+        onload: (r) => (r.status >= 200 && r.status < 300)
+          ? (log(`📤 Practice batch ${batchIdx} posted to doc.`, 'sys'), resolve())
+          : reject(new Error(`HTTP ${r.status}`)),
+        onerror: () => reject(new Error('Network error')),
+      });
+    });
   }
 
   function pauseGeneration() {
