@@ -38,6 +38,8 @@
     WORKFLOW:        `${APP_ID}_workflow`,
     PROGRESS:        `${APP_ID}_progress`,
     PIPELINE_STATE:  `${APP_ID}_pipelineState`,
+    PRACTICE_CONFIG: `${APP_ID}_practiceConfig`,
+    SAMPLE_MAPPING:  `${APP_ID}_sampleMapping`,
   };
 
   const STATE = {
@@ -57,6 +59,32 @@
     maxLinesPerPara: 8,
     startFromPage:  1,
   };
+
+  const DEFAULT_PRACTICE_CONFIG = {
+    totalQuestions:   100,
+    perBatch:         10,
+    explMinLength:    80,
+    explMaxLength:    250,
+  };
+
+  // Sample Question Mapping — fields to auto-detect with weights
+  // Each field receives a weight% and a detected value from GPT after outline upload.
+  const SAMPLE_MAPPING_FIELDS = [
+    { key: 'scenarioBased',   label: 'Scenario-based questions',   unit: '%' },
+    { key: 'definitionType',  label: 'Definition type',             unit: '%' },
+    { key: 'recallStatement', label: 'Recall / Statemental type',   unit: '%' },
+    { key: 'applicationBased',label: 'Application-based',           unit: '%' },
+    { key: 'fillInTheBlanks', label: 'Fill in the blanks',          unit: '%' },
+    { key: 'statementsLength',label: 'Statements length (words)',   unit: 'w' },
+    { key: 'optionsCount',    label: 'Options count (per MCQ)',     unit: 'n' },
+    { key: 'chartsGraphsImg', label: 'Charts / Graphs / Images',    unit: '%' },
+  ];
+
+  const DEFAULT_SAMPLE_MAPPING = (() => {
+    const m = {};
+    SAMPLE_MAPPING_FIELDS.forEach(f => { m[f.key] = { weight: 0, detected: '' }; });
+    return m;
+  })();
 
   const DEFAULT_IMAGE_CONFIG = {
     enableGemini:           true,
@@ -398,6 +426,59 @@
       font-style: italic;
     }
 
+    /* Sample mapping rows */
+    #sg-sample-mapping-list {
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .sg-sm-row {
+      display: grid;
+      grid-template-columns: 1.5fr 68px 90px;
+      gap: 6px;
+      align-items: center;
+    }
+    .sg-sm-label {
+      font-size: 11.5px;
+      color: #cbd5e1;
+      line-height: 1.25;
+    }
+    .sg-sm-label small {
+      display: block;
+      font-size: 9.5px;
+      color: #64748b;
+      margin-top: 1px;
+    }
+    .sg-sm-row input {
+      background: #0b1220;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 5px 7px;
+      font-size: 11.5px;
+      outline: none;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .sg-sm-row input:focus { border-color: #3b82f6; }
+    .sg-sm-detected {
+      font-size: 11px;
+      font-weight: 700;
+      color: #4ade80;
+      background: #052e16;
+      border: 1px solid #16a34a;
+      border-radius: 6px;
+      padding: 5px 7px;
+      text-align: center;
+      min-height: 18px;
+      line-height: 1.2;
+    }
+    .sg-sm-detected.empty {
+      color: #64748b;
+      background: #0b1220;
+      border-color: #334155;
+      font-weight: 500;
+      font-style: italic;
+    }
+
     /* Big Auto Generate button */
     #sg-auto-generate {
       width: 100%;
@@ -633,12 +714,14 @@
   let abortFlag    = false;
   let pauseFlag    = false;
   let skipFlag     = false;
-  let examConfig   = loadObj(STORAGE_KEYS.EXAM_CONFIG,  DEFAULT_EXAM_CONFIG);
-  let imageConfig  = loadObj(STORAGE_KEYS.IMAGE_CONFIG, DEFAULT_IMAGE_CONFIG);
-  let refConfig    = loadObj(STORAGE_KEYS.REF_CONFIG,   DEFAULT_REF_CONFIG);
-  let workflow     = loadObj(STORAGE_KEYS.WORKFLOW,     DEFAULT_WORKFLOW);
-  let progress     = loadObj(STORAGE_KEYS.PROGRESS,     DEFAULT_PROGRESS);
-  let domains      = loadObj(STORAGE_KEYS.DOMAINS,      []); // [{name, weight}]
+  let examConfig     = loadObj(STORAGE_KEYS.EXAM_CONFIG,     DEFAULT_EXAM_CONFIG);
+  let imageConfig    = loadObj(STORAGE_KEYS.IMAGE_CONFIG,    DEFAULT_IMAGE_CONFIG);
+  let refConfig      = loadObj(STORAGE_KEYS.REF_CONFIG,      DEFAULT_REF_CONFIG);
+  let workflow       = loadObj(STORAGE_KEYS.WORKFLOW,        DEFAULT_WORKFLOW);
+  let progress       = loadObj(STORAGE_KEYS.PROGRESS,        DEFAULT_PROGRESS);
+  let domains        = loadObj(STORAGE_KEYS.DOMAINS,         []); // [{name, weight}]
+  let practiceConfig = loadObj(STORAGE_KEYS.PRACTICE_CONFIG, DEFAULT_PRACTICE_CONFIG);
+  let sampleMapping  = loadObj(STORAGE_KEYS.SAMPLE_MAPPING,  DEFAULT_SAMPLE_MAPPING);
 
   // ─────────────────────────────────────────────────────────────
   //  UI BUILD
@@ -692,6 +775,57 @@
             </div>
           </div>
           <button class="sg-save-btn" id="sg-save-exam">💾 Save Exam Config</button>
+        </div>
+
+        <!-- 1b. PRACTICE QUESTIONS GENERATION -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>🎓 Practice Questions Generation</span>
+            <span class="sg-badge-required">REQUIRED</span>
+          </div>
+          <div class="sg-grid-2">
+            <div class="sg-field">
+              <label>Total Questions Generation</label>
+              <input type="number" id="sg-pq-total" min="1" />
+            </div>
+            <div class="sg-field">
+              <label>Per Batch Questions</label>
+              <input type="number" id="sg-pq-batch" min="1" />
+            </div>
+          </div>
+          <div class="sg-grid-2">
+            <div class="sg-field">
+              <label>Explanation Min Length (words)</label>
+              <input type="number" id="sg-pq-expl-min" min="10" />
+            </div>
+            <div class="sg-field">
+              <label>Explanation Max Length (words)</label>
+              <input type="number" id="sg-pq-expl-max" min="10" />
+            </div>
+          </div>
+          <button class="sg-save-btn" id="sg-save-practice">💾 Save Practice Config</button>
+        </div>
+
+        <!-- 1c. AUTO-DETECT SAMPLE QUESTION MAPPINGS -->
+        <div class="sg-section">
+          <div class="sg-section-title">
+            <span>🧩 Auto-Detect Sample Question Mappings</span>
+            <span class="sg-badge-on">AUTO</span>
+          </div>
+          <div class="sg-section-sub">
+            After outline/books upload, the script asks GPT to analyse the exam and return a weighted
+            distribution for each question type below. Detected values appear next to each field and
+            are used when generating practice questions.
+          </div>
+          <div id="sg-sample-mapping-list"></div>
+          <div class="sg-grid-2" style="gap:6px;margin-top:6px">
+            <button class="sg-step-btn" id="sg-sm-reset">↺ Reset</button>
+            <button class="sg-step-btn primary" id="sg-sm-detect">🔍 Auto-Detect Now</button>
+          </div>
+          <div style="margin-top:6px;text-align:right;font-size:10px;color:#64748b" id="sg-sm-total">
+            Total weight (% fields): 0%
+          </div>
+          <button class="sg-save-btn" id="sg-save-sample">💾 Save Mapping</button>
         </div>
 
         <!-- 2. VISUAL CONTENT GENERATION -->
@@ -941,6 +1075,7 @@
     document.body.appendChild(panel);
     applyConfigsToUI();
     renderDomains();
+    renderSampleMapping();
     updateProgressUI();
     bindEvents();
   }
@@ -967,6 +1102,12 @@
     setToggle('tog-generateDiagrams',      imageConfig.generateDiagrams);
     setToggle('tog-networkAnatomyFlow',    imageConfig.networkAnatomyFlow);
     $('#sg-max-wait').value = imageConfig.maxWaitGeminiSec;
+
+    // Practice
+    $('#sg-pq-total').value    = practiceConfig.totalQuestions;
+    $('#sg-pq-batch').value    = practiceConfig.perBatch;
+    $('#sg-pq-expl-min').value = practiceConfig.explMinLength;
+    $('#sg-pq-expl-max').value = practiceConfig.explMaxLength;
 
     // Reference
     $('#sg-remind-every').value = refConfig.reminderEveryPages;
@@ -1053,6 +1194,55 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  SAMPLE-QUESTION-MAPPING RENDER
+  // ─────────────────────────────────────────────────────────────
+  function renderSampleMapping() {
+    const list = $('#sg-sample-mapping-list');
+    if (!list) return;
+    list.innerHTML = SAMPLE_MAPPING_FIELDS.map(f => {
+      const entry = sampleMapping[f.key] || { weight: 0, detected: '' };
+      const detected = (entry.detected === '' || entry.detected === null || entry.detected === undefined)
+        ? `<span class="sg-sm-detected empty">not detected</span>`
+        : `<span class="sg-sm-detected">${escapeHtml(String(entry.detected))}</span>`;
+      return `
+        <div class="sg-sm-row" data-key="${f.key}">
+          <div class="sg-sm-label">
+            ${escapeHtml(f.label)}
+            <small>weight (${f.unit}) → detected</small>
+          </div>
+          <input type="number" step="0.1" min="0" placeholder="${f.unit}"
+                 value="${entry.weight ?? ''}" data-field="weight" data-key="${f.key}" />
+          ${detected}
+        </div>
+      `;
+    }).join('');
+
+    list.querySelectorAll('input').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const key = e.target.dataset.key;
+        const val = parseFloat(e.target.value);
+        if (!sampleMapping[key]) sampleMapping[key] = { weight: 0, detected: '' };
+        sampleMapping[key].weight = isNaN(val) ? 0 : val;
+        saveObj(STORAGE_KEYS.SAMPLE_MAPPING, sampleMapping);
+        updateSampleMappingTotal();
+      });
+    });
+    updateSampleMappingTotal();
+  }
+
+  function updateSampleMappingTotal() {
+    // Only sum fields whose unit is '%'
+    const pctKeys = SAMPLE_MAPPING_FIELDS.filter(f => f.unit === '%').map(f => f.key);
+    const total = pctKeys.reduce((s, k) =>
+      s + (parseFloat(sampleMapping[k]?.weight) || 0), 0);
+    const el = $('#sg-sm-total');
+    if (!el) return;
+    el.textContent = `Total weight (% fields): ${total.toFixed(1)}%`;
+    el.style.color = (Math.abs(total - 100) < 0.5) ? '#4ade80'
+                   : (total > 100 ? '#f87171' : '#fbbf24');
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  EVENTS
   // ─────────────────────────────────────────────────────────────
   function bindEvents() {
@@ -1068,6 +1258,10 @@
     $('#sg-save-image').addEventListener('click', saveImageConfig);
     $('#sg-save-ref').addEventListener('click', saveRefConfig);
     $('#sg-save-docs').addEventListener('click', saveDocsConfig);
+    $('#sg-save-practice').addEventListener('click', savePracticeConfig);
+    $('#sg-save-sample').addEventListener('click', saveSampleMapping);
+    $('#sg-sm-reset').addEventListener('click', resetSampleMapping);
+    $('#sg-sm-detect').addEventListener('click', autoDetectSampleMapping);
 
     // Toggles — clicking flips state and auto-saves immediately.
     bindToggle('tog-enableGemini',          imageConfig, 'enableGemini',          STORAGE_KEYS.IMAGE_CONFIG);
@@ -1190,6 +1384,100 @@
     notify('Docs connection saved!');
   }
 
+  function savePracticeConfig() {
+    practiceConfig = {
+      totalQuestions: parseInt($('#sg-pq-total').value, 10)    || DEFAULT_PRACTICE_CONFIG.totalQuestions,
+      perBatch:       parseInt($('#sg-pq-batch').value, 10)    || DEFAULT_PRACTICE_CONFIG.perBatch,
+      explMinLength:  parseInt($('#sg-pq-expl-min').value, 10) || DEFAULT_PRACTICE_CONFIG.explMinLength,
+      explMaxLength:  parseInt($('#sg-pq-expl-max').value, 10) || DEFAULT_PRACTICE_CONFIG.explMaxLength,
+    };
+    if (practiceConfig.explMinLength > practiceConfig.explMaxLength) {
+      log('⚠ Explanation min length > max length — swapping.', 'warn');
+      const t = practiceConfig.explMinLength;
+      practiceConfig.explMinLength = practiceConfig.explMaxLength;
+      practiceConfig.explMaxLength = t;
+    }
+    saveObj(STORAGE_KEYS.PRACTICE_CONFIG, practiceConfig);
+    log(`✔ Practice config saved — ${practiceConfig.totalQuestions} Q, ${practiceConfig.perBatch}/batch.`, 'ok');
+    notify('Practice configuration saved!');
+  }
+
+  function saveSampleMapping() {
+    saveObj(STORAGE_KEYS.SAMPLE_MAPPING, sampleMapping);
+    log('✔ Sample question mapping saved.', 'ok');
+    notify('Sample mapping saved!');
+  }
+
+  function resetSampleMapping() {
+    if (!confirm('Reset all sample question mapping weights and detected values?')) return;
+    sampleMapping = JSON.parse(JSON.stringify(DEFAULT_SAMPLE_MAPPING));
+    saveObj(STORAGE_KEYS.SAMPLE_MAPPING, sampleMapping);
+    renderSampleMapping();
+    log('↺ Sample mapping reset.', 'warn');
+  }
+
+  async function autoDetectSampleMapping() {
+    if (!isOnGPT()) {
+      log('⚠ Sample mapping auto-detect runs on ChatGPT. Open chatgpt.com.', 'warn');
+      return;
+    }
+    if (!examConfig.examName) {
+      log('⚠ Set Exam Name first.', 'warn');
+      return;
+    }
+
+    log('🔍 Asking GPT to detect sample question mapping distribution...', 'info');
+
+    const fieldList = SAMPLE_MAPPING_FIELDS.map(f =>
+      `  - "${f.key}" → ${f.label} (unit: ${f.unit === '%' ? 'percent weight' : f.unit === 'w' ? 'average word count' : 'integer count'})`
+    ).join('\n');
+
+    const prompt = `You are analysing the exam "${examConfig.examName}" using the outline and reference books I uploaded.
+
+Estimate the typical SAMPLE QUESTION distribution for this exam. For every field below, return a single numeric value:
+- Fields with unit "percent weight" → percentage 0–100 (all % fields must sum to 100).
+- Fields with unit "average word count" → typical statement length (e.g. 25).
+- Fields with unit "integer count" → typical option count per MCQ (e.g. 4 or 5).
+
+Fields:
+${fieldList}
+
+Return STRICT JSON ONLY in this shape, no prose:
+{
+  "scenarioBased":    0,
+  "definitionType":   0,
+  "recallStatement":  0,
+  "applicationBased": 0,
+  "fillInTheBlanks":  0,
+  "statementsLength": 0,
+  "optionsCount":     0,
+  "chartsGraphsImg":  0
+}`;
+
+    try {
+      const raw = await sendToGPT(prompt);
+      const data = extractJSON(raw);
+      let updated = 0;
+      SAMPLE_MAPPING_FIELDS.forEach(f => {
+        if (data && Object.prototype.hasOwnProperty.call(data, f.key)) {
+          const val = parseFloat(data[f.key]);
+          if (!isNaN(val)) {
+            if (!sampleMapping[f.key]) sampleMapping[f.key] = { weight: 0, detected: '' };
+            sampleMapping[f.key].detected = val;
+            sampleMapping[f.key].weight   = val;
+            updated++;
+          }
+        }
+      });
+      saveObj(STORAGE_KEYS.SAMPLE_MAPPING, sampleMapping);
+      renderSampleMapping();
+      log(`✔ Auto-detected ${updated} sample mapping fields.`, 'ok');
+      notify(`Sample mapping: ${updated} fields detected.`);
+    } catch (err) {
+      log(`✗ Sample mapping detect failed: ${err.message}`, 'error');
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────
   //  WORKFLOW STEPS
   // ─────────────────────────────────────────────────────────────
@@ -1213,13 +1501,14 @@
     }
   }
 
-  function confirmUpload(kind) {
+  async function confirmUpload(kind) {
     if (kind === 'outline') {
       workflow.outlineUploaded = true;
-      log('✔ Outline confirmed. Attempting auto-detect of domains...', 'ok');
+      log('✔ Outline confirmed. Auto-detecting domains + sample mapping...', 'ok');
       applyWorkflowUI();
       saveObj(STORAGE_KEYS.WORKFLOW, workflow);
-      autoDetectDomains();
+      await autoDetectDomains();
+      await autoDetectSampleMapping();
     } else if (kind === 'books') {
       workflow.booksUploaded = true;
       log('✔ Reference books confirmed.', 'ok');
