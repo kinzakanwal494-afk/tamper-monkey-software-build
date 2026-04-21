@@ -121,6 +121,7 @@
     words:      0,
     skipped:    0,
     images:     0,
+    questions:  0,
     recent:     [],
     currentPage: 0,
   };
@@ -624,6 +625,8 @@
     .sg-btn-skip:hover:not(:disabled)   { background: #334155; }
     .sg-btn-reset  { background: #1e293b; color: #f87171; border: 1px solid #dc2626; grid-column: span 3; }
     .sg-btn-reset:hover:not(:disabled)  { background: #7f1d1d; color: #fff; }
+    .sg-btn-verify { background: linear-gradient(135deg, #0f766e, #0891b2); color: #fff; }
+    .sg-btn-verify:hover:not(:disabled) { background: linear-gradient(135deg, #0d5e57, #0e7490); }
 
     /* Status */
     #sg-status-badge {
@@ -803,7 +806,13 @@
               <input type="number" id="sg-pq-expl-max" min="10" />
             </div>
           </div>
-          <button class="sg-save-btn" id="sg-save-practice">💾 Save Practice Config</button>
+          <div class="sg-grid-2" style="gap:6px">
+            <button class="sg-save-btn" id="sg-save-practice" style="margin-top:0">💾 Save Practice Config</button>
+            <button class="sg-save-btn" id="sg-gen-practice" style="margin-top:0;background:linear-gradient(135deg,#7c3aed,#2563eb)">🎓 Generate Now</button>
+          </div>
+          <div id="sg-pq-progress" style="margin-top:8px;font-size:10.5px;color:#94a3b8;text-align:center">
+            0 / 0 questions generated
+          </div>
         </div>
 
         <!-- 1c. AUTO-DETECT SAMPLE QUESTION MAPPINGS -->
@@ -1014,6 +1023,7 @@
             <div class="sg-stat word"><span class="sg-stat-val" id="sg-stat-words">0</span><span class="sg-stat-lbl">words</span></div>
             <div class="sg-stat skip"><span class="sg-stat-val" id="sg-stat-skipped">⏭ 0</span><span class="sg-stat-lbl">skipped</span></div>
             <div class="sg-stat img"><span class="sg-stat-val" id="sg-stat-images">🖼 0</span><span class="sg-stat-lbl">images</span></div>
+            <div class="sg-stat" style="grid-column:span 3"><span class="sg-stat-val" id="sg-stat-questions" style="color:#c084fc">🎓 0</span><span class="sg-stat-lbl">practice questions</span></div>
           </div>
 
           <div style="margin-top:10px;font-size:10.5px;color:#94a3b8;font-weight:700">Recent Pages</div>
@@ -1024,6 +1034,7 @@
         <div class="sg-section">
           <div class="sg-section-title"><span>🎯 Controls</span></div>
           <div class="sg-controls">
+            <button class="sg-btn sg-btn-verify" id="sg-btn-verify" style="grid-column:span 3">📋 Start Exam Verification</button>
             <button class="sg-btn sg-btn-start"  id="sg-btn-start">▶ Start Generation</button>
             <button class="sg-btn sg-btn-pause"  id="sg-btn-pause"  disabled>⏸ Pause</button>
             <button class="sg-btn sg-btn-resume" id="sg-btn-resume" disabled>▶ Resume</button>
@@ -1259,6 +1270,7 @@
     $('#sg-save-ref').addEventListener('click', saveRefConfig);
     $('#sg-save-docs').addEventListener('click', saveDocsConfig);
     $('#sg-save-practice').addEventListener('click', savePracticeConfig);
+    $('#sg-gen-practice').addEventListener('click', generatePracticeQuestions);
     $('#sg-save-sample').addEventListener('click', saveSampleMapping);
     $('#sg-sm-reset').addEventListener('click', resetSampleMapping);
     $('#sg-sm-detect').addEventListener('click', autoDetectSampleMapping);
@@ -1293,6 +1305,7 @@
 
     // Auto-generate + controls
     $('#sg-auto-generate').addEventListener('click', autoGenerate);
+    $('#sg-btn-verify').addEventListener('click', startExamVerification);
     $('#sg-btn-start').addEventListener('click', startGeneration);
     $('#sg-btn-pause').addEventListener('click', pauseGeneration);
     $('#sg-btn-resume').addEventListener('click', resumeGeneration);
@@ -1556,6 +1569,83 @@ Rules:
       notify(`Detected ${domains.length} domains from outline.`);
     } catch (err) {
       log(`✗ Auto-detect failed: ${err.message}`, 'error');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  EXAM VERIFICATION (pre-flight check via GPT)
+  // ─────────────────────────────────────────────────────────────
+  async function startExamVerification() {
+    if (!examConfig.examName) {
+      log('⚠ Enter the Exam Name first.', 'warn');
+      return;
+    }
+    if (!isOnGPT()) {
+      log('⚠ Exam verification runs on ChatGPT. Open chatgpt.com and retry.', 'warn');
+      return;
+    }
+
+    const btn = $('#sg-btn-verify');
+    btn.disabled = true;
+    btn.textContent = '⏳ Verifying...';
+    log(`📋 Starting exam verification for "${examConfig.examName}"...`, 'info');
+
+    const prompt = `You are a study-guide architect. Verify the following exam and return ONLY STRICT JSON:
+
+Exam: ${examConfig.examName}
+
+Return JSON (no prose):
+{
+  "exam_name": "",
+  "governing_body": "",
+  "total_questions": 0,
+  "time_limit_minutes": 0,
+  "passing_score": "",
+  "question_types": [],
+  "domains": [{"name":"","weight_percent":0,"subdomain_count":0}],
+  "recommended_references": [],
+  "verified": true,
+  "warnings": []
+}
+
+Rules:
+- If the exam is unknown or ambiguous, set "verified": false and list issues in "warnings".
+- Domain weights must sum to 100 when verified is true.
+- Use the exact official names (no paraphrasing).`;
+
+    try {
+      const raw = await sendToGPT(prompt);
+      const data = extractJSON(raw);
+
+      if (!data || data.verified === false) {
+        const warnings = (data && data.warnings) ? data.warnings.join('; ') : 'Exam not verified.';
+        log(`✗ Verification failed: ${warnings}`, 'error');
+        notify('Exam verification failed — see console.');
+      } else {
+        log(`✔ Verified: ${data.exam_name || examConfig.examName}`, 'ok');
+        if (data.governing_body)     log(`   Governing body: ${data.governing_body}`, 'sys');
+        if (data.total_questions)    log(`   Total questions: ${data.total_questions}`, 'sys');
+        if (data.time_limit_minutes) log(`   Time limit: ${data.time_limit_minutes} min`, 'sys');
+        if (data.passing_score)      log(`   Passing score: ${data.passing_score}`, 'sys');
+        if (Array.isArray(data.question_types) && data.question_types.length) {
+          log(`   Question types: ${data.question_types.join(', ')}`, 'sys');
+        }
+        if (Array.isArray(data.domains) && data.domains.length) {
+          log(`   Detected ${data.domains.length} domain(s) — pre-filling Domain Weights.`, 'sys');
+          domains = data.domains.map(d => ({
+            name:   String(d.name || '').trim(),
+            weight: parseFloat(d.weight_percent) || 0,
+          })).filter(d => d.name);
+          saveObj(STORAGE_KEYS.DOMAINS, domains);
+          renderDomains();
+        }
+        notify('Exam verified successfully!');
+      }
+    } catch (err) {
+      log(`✗ Exam verification error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📋 Start Exam Verification';
     }
   }
 
@@ -2090,6 +2180,13 @@ Label every part. Textbook quality. No watermarks.`,
     $('#sg-stat-words').textContent   = progress.words.toLocaleString();
     $('#sg-stat-skipped').textContent = `⏭ ${progress.skipped}`;
     $('#sg-stat-images').textContent  = `🖼 ${progress.images}`;
+    const qEl = $('#sg-stat-questions');
+    if (qEl) qEl.textContent = `🎓 ${progress.questions || 0}`;
+    const pqPg = $('#sg-pq-progress');
+    if (pqPg) {
+      const tot = practiceConfig.totalQuestions || 0;
+      pqPg.textContent = `${progress.questions || 0} / ${tot} questions generated`;
+    }
 
     renderRecent();
   }
