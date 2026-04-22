@@ -126,6 +126,17 @@
     questions:  0,
     recent:     [],
     currentPage: 0,
+    // ── Checkpoint fields — let "Start Generation" resume at the right step ──
+    // phase: 'idle' | 'rules' | 'outline' | 'mapping' | 'alloc' | 'samples'
+    //      | 'sample_mapping' | 'books' | 'verify' | 'domain' | 'done'
+    phase:         'idle',
+    domainIdx:     0,   // current domain index (0-based)
+    // subPhase within a domain: 'overview' | 'purpose' | 'target' | 'memory' | 'content' | 'practice' | 'done'
+    subPhase:      'overview',
+    overviewPage:  0,   // 0 = none done, 1 = page1 done, 2 = page2 done
+    subIdx:        0,   // index of current subdomain within the domain
+    subPageDone:   0,   // pages of current subdomain already saved
+    practiceDone:  0,   // questions already saved for the current domain
   };
 
   // v13 Enforced reference rules (shown in UI, always on)
@@ -2065,28 +2076,47 @@ Do NOT generate anything yet. Reply ONLY: RULES ACKNOWLEDGED — READY FOR OUTLI
     subjectRulesAcknowledged = false;
 
     setUIState(STATE.RUNNING);
-    log(`▶ Starting full generation pipeline for "${examConfig.examName}"...`, 'info');
+
+    // ── RESUME DETECTION ────────────────────────────────────────
+    // If saved checkpoint says we're mid-run, skip every phase that's already done.
+    const resume = resumeSummary();
+    const skipTo = progress.phase && progress.phase !== 'idle' && progress.phase !== 'done';
+    if (skipTo) {
+      log(`▶ Resuming from saved checkpoint: ${resume}`, 'info');
+      notify('Resuming generation — skipping completed steps.');
+    } else {
+      log(`▶ Starting full generation pipeline for "${examConfig.examName}"...`, 'info');
+      saveCheckpoint({ phase: 'rules', domainIdx: 0, subPhase: 'overview', overviewPage: 0, subIdx: 0, subPageDone: 0, practiceDone: 0 });
+    }
 
     try {
-      // 1) Inject master rules, wait for acknowledgement
-      log('📜 Injecting master rules into GPT...', 'info');
-      const ackResp = await sendToGPT(buildMasterRules());
-      if (!/RULES\s+ACKNOWLEDGED/i.test(ackResp)) {
-        log('⚠ GPT did not acknowledge rules verbatim, continuing anyway.', 'warn');
+      // 1) Inject master rules
+      if (phaseBefore('rules') === false) {
+        log('📜 Injecting master rules into GPT...', 'info');
+        const ackResp = await sendToGPT(buildMasterRules());
+        if (!/RULES\s+ACKNOWLEDGED/i.test(ackResp)) log('⚠ GPT did not acknowledge rules verbatim — continuing.', 'warn');
+        else log('✔ GPT acknowledged rules.', 'ok');
+        subjectRulesAcknowledged = true;
+        saveCheckpoint({ phase: 'outline' });
       } else {
-        log('✔ GPT acknowledged rules.', 'ok');
+        log('⏭ Skip: rules already injected.', 'sys');
       }
-      subjectRulesAcknowledged = true;
 
-      // 2) Ask user to upload outline
-      showStepNotify('Upload Exam Outline', 'Open ChatGPT + button, upload the outline PDF, then click "✓ Confirm Outline" in the Workflow section.');
-      notify('Upload exam outline to ChatGPT now.');
-      log('⏸ Waiting for outline upload + confirmation...', 'warn');
-      await waitForConfirm('outline');
-      if (abortFlag) throw new Error('Aborted');
+      // 2) Outline upload
+      if (phaseBefore('outline') === false) {
+        showStepNotify('Upload Exam Outline', 'Open ChatGPT + button, upload the outline PDF, then click "✓ Confirm Outline".');
+        notify('Upload exam outline to ChatGPT now.');
+        log('⏸ Waiting for outline upload + confirmation...', 'warn');
+        await waitForConfirm('outline');
+        if (abortFlag) throw new Error('Aborted');
+        saveCheckpoint({ phase: 'mapping' });
+      } else {
+        log('⏭ Skip: outline already confirmed.', 'sys');
+      }
 
-      // 3) Ask GPT to confirm outline + emit domain mapping in strict format
-      log('🗺 Requesting strict domain + subdomain mapping...', 'info');
+      // 3) Domain mapping
+      if (phaseBefore('mapping') === false) {
+        log('🗺 Requesting strict domain + subdomain mapping...', 'info');
       const mappingPrompt = `Step 1: Confirm you have read the outline I just uploaded. Start your reply with exactly:
 OUTLINE_CONFIRMED
 
@@ -2106,58 +2136,76 @@ Rules:
 - Use official exam weights from the outline I uploaded.
 - Four spaces between subdomain name and its weight percent.`;
 
-      const mappingResp = await sendToGPT(mappingPrompt);
-      if (!/OUTLINE_CONFIRMED/i.test(mappingResp)) {
-        log('⚠ GPT did not confirm outline. Continuing with parse attempt.', 'warn');
+        const mappingResp = await sendToGPT(mappingPrompt);
+        if (!/OUTLINE_CONFIRMED/i.test(mappingResp)) log('⚠ GPT did not confirm outline. Continuing with parse attempt.', 'warn');
+        const parsed = parseDomainMapping(mappingResp);
+        if (!parsed.domains.length) throw new Error('Could not parse any domains from GPT mapping response.');
+        domains = parsed.domains;
+        saveObj(STORAGE_KEYS.DOMAINS, domains);
+        renderDomains();
+        log(`✔ Parsed ${domains.length} domain(s), ${parsed.totalSub} subdomain(s).`, 'ok');
+        saveCheckpoint({ phase: 'alloc' });
+      } else {
+        log('⏭ Skip: domain mapping already done.', 'sys');
       }
-      const parsed = parseDomainMapping(mappingResp);
-      if (!parsed.domains.length) {
-        throw new Error('Could not parse any domains from GPT mapping response.');
-      }
-      domains = parsed.domains; // [{name, weight, subdomains:[{name,weight}]}]
-      saveObj(STORAGE_KEYS.DOMAINS, domains);
-      renderDomains();
-      log(`✔ Parsed ${domains.length} domain(s), ${parsed.totalSub} subdomain(s).`, 'ok');
 
-      // 3b) Page allocation — give GPT exact page counts and let it commit
-      // to how many pages per domain + per subdomain so the total matches
-      // the UI value exactly. We parse it and cache into domains[*].pages
-      // + domains[*].subdomains[*].pages so per-page generation uses it.
-      log(`📏 Allocating ${examConfig.totalPages} pages across domains + subdomains (by weight)...`, 'info');
-      const allocPrompt = buildPageAllocationPrompt(domains, examConfig.totalPages);
-      const allocResp   = await sendToGPT(allocPrompt);
-      const alloc       = parsePageAllocation(allocResp, domains, examConfig.totalPages);
-      applyPageAllocation(alloc);
-      saveObj(STORAGE_KEYS.DOMAINS, domains);
-      renderDomains();
+      // 3b) Page allocation
+      if (phaseBefore('alloc') === false) {
+        log(`📏 Allocating ${examConfig.totalPages} pages across domains + subdomains...`, 'info');
+        const allocPrompt = buildPageAllocationPrompt(domains, examConfig.totalPages);
+        const allocResp   = await sendToGPT(allocPrompt);
+        const alloc       = parsePageAllocation(allocResp, domains, examConfig.totalPages);
+        applyPageAllocation(alloc);
+        saveObj(STORAGE_KEYS.DOMAINS, domains);
+        renderDomains();
+        saveCheckpoint({ phase: 'samples' });
+      } else {
+        log('⏭ Skip: page allocation already committed.', 'sys');
+      }
 
       // 4) Upload sample questions
-      showStepNotify('Upload Sample Questions', 'Upload sample-question PDFs to ChatGPT, then click "✓ Confirm Samples".');
-      notify('Upload sample-question PDFs to ChatGPT now.');
-      log('⏸ Waiting for sample questions upload + confirmation...', 'warn');
-      await waitForConfirm('samples');
-      if (abortFlag) throw new Error('Aborted');
+      if (phaseBefore('samples') === false) {
+        showStepNotify('Upload Sample Questions', 'Upload sample-question PDFs to ChatGPT, then click "✓ Confirm Samples".');
+        notify('Upload sample-question PDFs to ChatGPT now.');
+        log('⏸ Waiting for sample questions upload + confirmation...', 'warn');
+        await waitForConfirm('samples');
+        if (abortFlag) throw new Error('Aborted');
+        saveCheckpoint({ phase: 'sample_mapping' });
+      } else {
+        log('⏭ Skip: samples already confirmed.', 'sys');
+      }
 
-      // 4a) Confirm samples + run mapping
-      log('🧩 Confirming samples + detecting sample mapping...', 'info');
-      await sendToGPT(`Confirm you have read the uploaded sample questions. Reply exactly:
+      // 4a) Sample-mapping detect
+      if (phaseBefore('sample_mapping') === false) {
+        log('🧩 Confirming samples + detecting sample mapping...', 'info');
+        await sendToGPT(`Confirm you have read the uploaded sample questions. Reply exactly:
 SAMPLES_CONFIRMED
 
 Then STOP — do not output anything else.`);
-      await autoDetectSampleMapping();
+        await autoDetectSampleMapping();
+        saveCheckpoint({ phase: 'books' });
+      } else {
+        log('⏭ Skip: sample mapping already done.', 'sys');
+      }
 
       // 5) Upload reference books
-      showStepNotify('Upload Reference Books', 'Upload ALL reference book PDFs to ChatGPT, then click "✓ Confirm Books".');
-      notify('Upload reference books to ChatGPT now.');
-      log('⏸ Waiting for reference-book upload + confirmation...', 'warn');
-      await waitForConfirm('books');
-      if (abortFlag) throw new Error('Aborted');
+      if (phaseBefore('books') === false) {
+        showStepNotify('Upload Reference Books', 'Upload ALL reference book PDFs to ChatGPT, then click "✓ Confirm Books".');
+        notify('Upload reference books to ChatGPT now.');
+        log('⏸ Waiting for reference-book upload + confirmation...', 'warn');
+        await waitForConfirm('books');
+        if (abortFlag) throw new Error('Aborted');
+        saveCheckpoint({ phase: 'verify' });
+      } else {
+        log('⏭ Skip: books already confirmed.', 'sys');
+      }
 
-      // 6) Send list of uploaded books + verify coverage
-      log('📚 Asking GPT to list uploaded books and verify coverage...', 'info');
-      let verifyOK = false;
-      let verifyTries = 0;
-      while (!verifyOK && !abortFlag) {
+      // 6) Coverage verification
+      if (phaseBefore('verify') === false) {
+        log('📚 Asking GPT to list uploaded books and verify coverage...', 'info');
+        let verifyOK = false;
+        let verifyTries = 0;
+        while (!verifyOK && !abortFlag) {
         verifyTries++;
         const verifyResp = await sendToGPT(`List every reference book you currently have access to (title + author if possible).
 Then cross-check EVERY domain and subdomain from the mapping above and say for each whether the reference data is:
@@ -2189,50 +2237,106 @@ Then re-check only the previously MISSING items. Reply STRICT JSON:
 {
   "still_missing": [ {"domain":"","subdomain":"","notes":""} ]
 }`);
+          }
         }
+        saveCheckpoint({ phase: 'domain', domainIdx: 0, subPhase: 'overview', overviewPage: 0, subIdx: 0, subPageDone: 0, practiceDone: 0 });
+      } else {
+        log('⏭ Skip: coverage already verified.', 'sys');
       }
 
-      // 7) Per-domain generation
-      for (let di = 0; di < domains.length; di++) {
+      // 7) Per-domain generation — resume-aware
+      const startDomain = Math.max(0, progress.domainIdx || 0);
+      for (let di = startDomain; di < domains.length; di++) {
         if (abortFlag) break;
         const d = domains[di];
         const domainNum = di + 1;
-        log(`🎯 ===== DOMAIN ${domainNum}: ${d.name} =====`, 'info');
 
-        // Overview (2 pages × ~500 words)
-        await generateOverview(d, domainNum);
-        // Purpose (1 page × ~600 words)
-        await generatePurposePage(d, domainNum);
-        // Subdomain purpose table
-        await generateSubdomainTable(d, domainNum);
-        // Memory check table
-        await generateMemoryTable(d, domainNum);
-
-        // Subdomain by subdomain content + images
-        const subs = d.subdomains || [];
-        for (let si = 0; si < subs.length; si++) {
-          if (abortFlag) break;
-          const sub = subs[si];
-          const subNum = si + 1;
-          log(`📘 Subdomain ${domainNum}.${subNum}: ${sub.name}`, 'info');
-          await generateSubdomainContent(d, domainNum, sub, subNum, si === 0);
+        // If we're resuming mid-domain, keep existing subPhase; else reset.
+        if (di !== startDomain) {
+          saveCheckpoint({
+            domainIdx: di, subPhase: 'overview',
+            overviewPage: 0, subIdx: 0, subPageDone: 0, practiceDone: 0,
+          });
+        } else if (!progress.subPhase) {
+          saveCheckpoint({ domainIdx: di, subPhase: 'overview', overviewPage: 0 });
+        } else {
+          saveCheckpoint({ domainIdx: di });
         }
+
+        log(`🎯 ===== DOMAIN ${domainNum}: ${d.name} =====`, 'info');
+        log(`   Resume plan: ${resumeSummary() || 'from start'}`, 'sys');
+
+        if (subPhaseBefore('overview') === false) {
+          await generateOverview(d, domainNum);
+          saveCheckpoint({ subPhase: 'purpose' });
+        } else log(`⏭ Skip overview (domain ${domainNum}).`, 'sys');
+
+        if (subPhaseBefore('purpose') === false) {
+          await generatePurposePage(d, domainNum);
+          saveCheckpoint({ subPhase: 'target' });
+        } else log(`⏭ Skip purpose (domain ${domainNum}).`, 'sys');
+
+        if (subPhaseBefore('target') === false) {
+          await generateSubdomainTable(d, domainNum);
+          saveCheckpoint({ subPhase: 'memory' });
+        } else log(`⏭ Skip target-covered table (domain ${domainNum}).`, 'sys');
+
+        if (subPhaseBefore('memory') === false) {
+          await generateMemoryTable(d, domainNum);
+          saveCheckpoint({ subPhase: 'content', subIdx: 0, subPageDone: 0 });
+        } else log(`⏭ Skip memory-check table (domain ${domainNum}).`, 'sys');
+
+        if (subPhaseBefore('content') === false) {
+          const subs = d.subdomains || [];
+          const startSub = Math.max(0, progress.subIdx || 0);
+          for (let si = startSub; si < subs.length; si++) {
+            if (abortFlag) break;
+            const sub = subs[si];
+            const subNum = si + 1;
+            const skipPages = (si === startSub) ? (progress.subPageDone || 0) : 0;
+            saveCheckpoint({ subIdx: si, subPageDone: skipPages });
+            log(`📘 Subdomain ${domainNum}.${subNum}: ${sub.name}${skipPages ? ` (resume from page ${skipPages+1})` : ''}`, 'info');
+            await generateSubdomainContent(d, domainNum, sub, subNum, si === 0, skipPages);
+            saveCheckpoint({ subIdx: si + 1, subPageDone: 0 });
+          }
+          saveCheckpoint({ subPhase: 'practice', practiceDone: progress.practiceDone || 0 });
+        } else log(`⏭ Skip content (domain ${domainNum}).`, 'sys');
 
         if (abortFlag) break;
 
-        // Practice questions for this domain
-        await generatePracticeQuestionsForDomain(d, domainNum);
+        if (subPhaseBefore('practice') === false) {
+          await generatePracticeQuestionsForDomain(d, domainNum);
+          saveCheckpoint({ subPhase: 'done', practiceDone: 0 });
+        } else log(`⏭ Skip practice questions (domain ${domainNum}).`, 'sys');
       }
 
       if (!abortFlag) {
         setUIState(STATE.IDLE);
         log('🎉 Full generation pipeline complete!', 'ok');
         notify('StudyGuide generation complete!');
+        saveCheckpoint({ phase: 'done' });
       }
     } catch (err) {
       setUIState(STATE.ERROR);
       log(`✗ Orchestrator error: ${err.message}`, 'error');
+      log('ℹ Press Resume to continue from the last saved step.', 'warn');
+      notify('Error — press Resume to continue.');
     }
+  }
+
+  // ── Phase comparators — return true if the already-saved phase is AFTER the given one ──
+  const PHASE_ORDER = ['idle','rules','outline','mapping','alloc','samples','sample_mapping','books','verify','domain','done'];
+  function phaseBefore(p) {
+    const cur = PHASE_ORDER.indexOf(progress.phase || 'idle');
+    const tgt = PHASE_ORDER.indexOf(p);
+    return cur > tgt; // true = saved phase is already past `p` → skip it
+  }
+
+  const SUB_PHASE_ORDER = ['overview','purpose','target','memory','content','practice','done'];
+  function subPhaseBefore(p) {
+    const cur = SUB_PHASE_ORDER.indexOf(progress.subPhase || 'overview');
+    const tgt = SUB_PHASE_ORDER.indexOf(p);
+    return cur > tgt;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -2411,7 +2515,8 @@ WRITING STYLE — MANDATORY, ZERO EXCEPTIONS:
   async function generateOverview(domain, domainNum) {
     log(`📖 Overview for ${domain.name} (2 pages × ~500 words, heading only, no sub-headings)...`, 'info');
     const subNames = (domain.subdomains || []).map(s => s.name).join(', ');
-    for (let p = 1; p <= 2; p++) {
+    const skip = Math.max(0, progress.overviewPage || 0);
+    for (let p = skip + 1; p <= 2; p++) {
       if (abortFlag) return;
       const firstPageHeader = (p === 1) ? `###Overview\n\n` : '';
       const prompt = `Write OVERVIEW page ${p} of 2 for Domain-${domainNum}: "${domain.name}".
@@ -2436,7 +2541,9 @@ Reply with the page content only.`;
         label:      `overview_d${domainNum}_p${p}`,
         allowImages:true,
       });
+      saveCheckpoint({ overviewPage: p });
     }
+    saveCheckpoint({ overviewPage: 0 }); // reset for next domain
   }
 
   async function generatePurposePage(domain, domainNum) {
@@ -2512,8 +2619,7 @@ Return the markdown only.`;
     });
   }
 
-  async function generateSubdomainContent(domain, domainNum, sub, subNum, isFirstSubOfDomain) {
-    // Use the committed page count from the page-allocation step
+  async function generateSubdomainContent(domain, domainNum, sub, subNum, isFirstSubOfDomain, skipPages = 0) {
     const pagesForSub = Math.max(
       1,
       parseInt(sub.pages, 10) ||
@@ -2521,9 +2627,9 @@ Return the markdown only.`;
     );
     const subStart = sub.startPage || '?';
     const subEnd   = sub.endPage   || '?';
-    log(`📄 Generating ${pagesForSub} page(s) for Subdomain-${domainNum}.${subNum}: ${sub.name} (p${subStart}–${subEnd})`, 'info');
+    log(`📄 ${pagesForSub} page(s) for Subdomain-${domainNum}.${subNum}: ${sub.name} (p${subStart}–${subEnd})${skipPages ? ` — resuming at page ${skipPages+1}` : ''}`, 'info');
 
-    for (let p = 1; p <= pagesForSub; p++) {
+    for (let p = Math.max(1, skipPages + 1); p <= pagesForSub; p++) {
       if (abortFlag) return;
       const absPage = (sub.startPage || 0) + p - 1;
       const headingBlock = (p === 1)
@@ -2536,8 +2642,9 @@ ${STYLE_RULES}
 
 STRUCTURE RULES:
 - Target ~${examConfig.wordsPerPage} words on this page.
-- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each. Every paragraph MUST end with one short "Example:" sentence and one short "Purpose:" sentence so the reader fully grasps the concept before moving on.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each. Every paragraph MUST end with one short "Example:" sentence and one short "Purpose:" sentence.
 - Use ### headings ONLY for specific concrete topic names (e.g. "###TCP Three-Way Handshake"). Absolutely NO generic names ("Introduction", "Overview", "Key Points", "Summary"). NO repeated headings. NO bold substitutes for headings.
+- TABLES: if the reference material on this topic naturally contains a comparative/structured data table (drug list, properties, values, protocol comparison, taxonomy, etc.), you MUST include at least one markdown table on this page. Skip the table only if the topic is purely narrative.
 ${p === 1
   ? `- BEGIN the response with exactly this heading block:\n${headingBlock}`
   : `- Continue from the previous page. Do NOT repeat any # or ## headings. Start directly with a fresh ### specific-topic heading.`}
@@ -2548,6 +2655,7 @@ Reply with the page content only.`;
         label:      `d${domainNum}_s${subNum}_p${p}`,
         allowImages:true,
       });
+      saveCheckpoint({ subPageDone: p });
     }
   }
 
@@ -2634,7 +2742,7 @@ Reply with the page content only.`;
       if (skipAll) return [];
 
       const instr = forceAlways
-        ? `This exam has image_frequency=every_page. You MUST return needs_image:true with at least ONE high-quality textbook-style image prompt that fits the page content (diagram/chart/anatomical figure/chemical structure/circuit/etc). Never return needs_image:false.`
+        ? `This exam has image_frequency=every_page. You MUST return needs_image:true with at least ONE textbook-style image prompt that fits the page content. Never return needs_image:false.`
         : `Include an image prompt ONLY if the page truly requires a diagram / chart / anatomical figure / chemical structure / circuit diagram to be understood. Otherwise return needs_image:false with prompts:[].`;
 
       const checkResp = await sendToGPT(`Analyse the page you just wrote for "${label}".
@@ -2642,7 +2750,7 @@ Reply STRICT JSON only:
 {
   "needs_image": true|false,
   "prompts": [
-    {"title": "short title", "prompt": "one paragraph extremely detailed image generation prompt, textbook quality, labels, no watermarks"}
+    {"title": "short topic name", "prompt": "one paragraph extremely detailed image generation prompt. Describe every element, label, arrow, and relationship to be drawn. Do NOT mention colour — the rendering style is fixed."}
   ]
 }
 Rules: ${instr}`);
@@ -2655,8 +2763,9 @@ Rules: ${instr}`);
       const results = [];
       for (const p of data.prompts) {
         if (abortFlag) break;
+        const styled = wrapWithBWStyle(p.prompt || '', p.title || label);
         try {
-          const img = await runGeminiPrompt(p.prompt, `${label}_${sanitizeLabel(p.title || 'img')}`);
+          const img = await runGeminiPrompt(styled, `${label}_${sanitizeLabel(p.title || 'img')}`);
           if (img) results.push({ label: p.title || label, dataUrl: img });
         } catch (err) {
           log(`⚠ Gemini image "${p.title}" failed: ${err.message}`, 'warn');
@@ -2667,6 +2776,26 @@ Rules: ${instr}`);
       log(`⚠ Image-check failed: ${err.message}`, 'warn');
       return [];
     }
+  }
+
+  // Every single image prompt we send to Gemini is wrapped with this hard
+  // black-and-white "illustrator / book-print infographic" style so results
+  // come out consistent with an academic textbook.
+  function wrapWithBWStyle(prompt, title) {
+    return `Create a BLACK AND WHITE academic textbook infographic titled: "${title}".
+
+STYLE — NON-NEGOTIABLE:
+- Pure black-and-white only. Grayscale allowed; NO colour anywhere.
+- Illustrator / vector infographic style, like a printed textbook or medical atlas.
+- Clean crisp outlines, thick bold strokes for primary shapes, thinner strokes for secondary.
+- Dashed lines for hidden / secondary references. Dotted lines for tertiary references.
+- Hatching / crosshatching for shading and regions. NO solid gradients or photorealism.
+- Bold black labels with neat leader lines and small arrowheads. No overlap.
+- White background. No watermarks. No borders. No decorative elements. No 3D rendering.
+- Professional book-print quality, suitable for an exam preparation study guide.
+
+CONTENT — follow exactly:
+${prompt}`;
   }
 
   function sanitizeLabel(s) {
@@ -2693,28 +2822,41 @@ Rules: ${instr}`);
     const perSubRule = 10;
     const totalFromUI = practiceConfig.totalQuestions || 0;
 
-    // Distribute UI total proportionally to domain weight; fallback = 10/sub.
-    let qForDomain;
-    if (totalFromUI > 0) {
-      const totalWeight = domains.reduce((s, d) => s + (d.weight || 0), 0) || 100;
-      qForDomain = Math.max(1, Math.round((domain.weight / totalWeight) * totalFromUI));
-    } else {
-      qForDomain = perSubRule * subCount;
-    }
-    if (qForDomain <= 0) qForDomain = perSubRule * subCount;
+    // The UI "Total Questions" value is the target PER DOMAIN.
+    // `Per-batch Questions` is just the throttle for each single GPT call.
+    let qForDomain = totalFromUI > 0 ? totalFromUI : (perSubRule * subCount);
+    if (qForDomain <= 0) qForDomain = perSubRule * Math.max(1, subCount);
 
     const typeBreakdown = buildTypeBreakdown(qForDomain);
     const optionsCount  = Math.max(2, parseInt(sampleMapping.optionsCount?.weight || 4, 10));
     const stmtLen       = parseInt(sampleMapping.statementsLength?.weight || 25, 10);
-    log(`🎓 Domain ${domainNum} "${domain.name}" — generating ${qForDomain} practice Q with weighted split: ${JSON.stringify(typeBreakdown)}`, 'info');
+    log(`🎓 Domain ${domainNum} "${domain.name}" — target ${qForDomain} practice Q per domain; weighted split: ${JSON.stringify(typeBreakdown)}`, 'info');
 
-    const batch = practiceConfig.perBatch || 10;
-    let produced = 0;
-    let batchIdx = 0;
-    // Track how many of each type we've already produced so every batch can
-    // demand the remaining budget from GPT — this prevents the weighted split
-    // from getting skipped.
+    const batch = Math.max(1, practiceConfig.perBatch || 10);
+    // Resume-aware: if we restarted mid-practice, continue from practiceDone.
+    let produced = Math.max(0, progress.practiceDone || 0);
+    let batchIdx = Math.floor(produced / batch);
     const remainingByType = { ...typeBreakdown };
+    // Deduct any questions already produced proportionally from remainingByType
+    if (produced > 0) {
+      const keys = Object.keys(remainingByType);
+      let deducted = 0;
+      keys.forEach(k => {
+        const share = Math.round((typeBreakdown[k] / Math.max(1, qForDomain)) * produced);
+        const take = Math.min(remainingByType[k], share);
+        remainingByType[k] -= take;
+        deducted += take;
+      });
+      // Absorb any rounding slack
+      let cursor = 0;
+      while (deducted < produced) {
+        const k = keys[cursor % keys.length];
+        if (remainingByType[k] > 0) { remainingByType[k] -= 1; deducted += 1; }
+        cursor++;
+        if (cursor > 10000) break;
+      }
+      log(`↻ Practice resume: ${produced}/${qForDomain} already produced for this domain.`, 'sys');
+    }
 
     while (produced < qForDomain && !abortFlag) {
       const remainingTotal = qForDomain - produced;
@@ -2776,15 +2918,16 @@ Return STRICT JSON only:
         await postQuestionsToDoc({ domain: domain.name, domainNum, batchIdx, questions: arr });
         produced += arr.length;
         progress.questions = (progress.questions || 0) + arr.length;
-        saveObj(STORAGE_KEYS.PROGRESS, progress);
+        saveCheckpoint({ practiceDone: produced });
         updateProgressUI();
         log(`✔ Practice batch ${batchIdx} → ${arr.length} Q (total ${produced}/${qForDomain})`, 'ok');
       } catch (err) {
         log(`✗ Practice batch ${batchIdx} failed: ${err.message}`, 'error');
-        break;
+        throw err; // bubble up so orchestrator catches and leaves checkpoint intact
       }
       await sleep(500);
     }
+    saveCheckpoint({ practiceDone: 0 });
   }
 
   function buildTypeBreakdown(totalQ) {
@@ -2883,8 +3026,16 @@ Return STRICT JSON only:
 
   function resumeGeneration() {
     pauseFlag = false;
-    setUIState(STATE.RUNNING);
-    log('▶ Resumed.', 'info');
+    // If nothing is running (stream error / ERROR state / stopped), start the
+    // orchestrator again — it'll pick up from the saved checkpoint.
+    if (currentState !== STATE.RUNNING) {
+      log('▶ Resuming from checkpoint...', 'info');
+      setUIState(STATE.RUNNING);
+      startGeneration();
+    } else {
+      setUIState(STATE.RUNNING);
+      log('▶ Resumed.', 'info');
+    }
   }
 
   function stopGeneration() {
@@ -3066,61 +3217,204 @@ Label every part. Textbook quality. No watermarks.`,
   }
 
   async function runGeminiPrompt(prompt, label) {
-    // If we're already on gemini.google.com, run inline. Else open a new tab with a flag in storage.
     if (window.location.hostname.includes('gemini.google.com')) {
       return await sendToGeminiAndCapture(prompt);
     }
-    // Cross-tab: open Gemini in a new tab with an instruction stored
-    log(`🌐 Opening Gemini in new tab for "${label}" — ensure you are logged in.`, 'img');
+
+    // Clear any stale result from a previous run
+    GM_setValue(`${APP_ID}_geminiResult_${label}`, null);
+    // Write pending task — the Gemini-side worker will see it once loaded
     GM_setValue(`${APP_ID}_pendingGeminiPrompt`, { prompt, label, ts: Date.now() });
-    GM_openInTab(GEMINI_URL, { active: false, insert: true });
-    // Poll storage for result (captured by the Gemini-side userscript instance)
-    const timeoutMs = imageConfig.maxWaitGeminiSec * 1000;
+
+    log(`🌐 Opening Gemini in new tab for "${label}" — the Gemini-side worker will drive it automatically.`, 'img');
+    try { GM_openInTab(GEMINI_URL, { active: false, insert: true, setParent: true }); }
+    catch (_) { window.open(GEMINI_URL, '_blank'); }
+
+    // Extra time for the new tab to load, detect prompt, run Gemini, and post back.
+    const timeoutMs = ((imageConfig.maxWaitGeminiSec || 120) + 60) * 1000;
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       if (abortFlag) return null;
       const result = GM_getValue(`${APP_ID}_geminiResult_${label}`, null);
-      if (result) {
+      if (result !== null && result !== undefined && result !== '') {
         GM_setValue(`${APP_ID}_geminiResult_${label}`, null);
         return result;
       }
-      await sleep(1500);
+      await sleep(2000);
     }
-    throw new Error('Gemini cross-tab timeout');
+    // Clean up
+    GM_setValue(`${APP_ID}_pendingGeminiPrompt`, null);
+    throw new Error('Gemini cross-tab timeout — no image received');
+  }
+
+  // Dismiss Gemini's error dialogs ("Something went wrong", "Try again later")
+  // and click any "Try again" button we can find so the prompt proceeds.
+  function dismissGeminiErrors() {
+    const text = document.body ? document.body.innerText : '';
+    const saw = /try again later|something went wrong|network error|unavailable/i.test(text);
+    // Look for explicit "Try again" / "Retry" / "Dismiss" buttons
+    const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    let clicked = 0;
+    for (const btn of allBtns) {
+      const t = (btn.innerText || btn.getAttribute('aria-label') || '').trim().toLowerCase();
+      if (!t) continue;
+      if (t === 'try again' || t === 'retry' || t === 'regenerate' || t === 'dismiss' || t === 'close' || t === 'ok') {
+        try { btn.click(); clicked++; } catch (_) {}
+      }
+    }
+    // Also close any snackbar/dialog close ✕ buttons
+    document.querySelectorAll('[role="dialog"] button[aria-label*="close" i], .mdc-snackbar button').forEach(b => {
+      try { b.click(); clicked++; } catch (_) {}
+    });
+    return { saw, clicked };
+  }
+
+  async function findGeminiInput() {
+    // Wait up to 20s — Gemini can load slowly
+    const sels = [
+      'rich-textarea .ql-editor',
+      'rich-textarea [contenteditable="true"]',
+      '[aria-label*="prompt" i][contenteditable="true"]',
+      'textarea[aria-label]',
+      'div[contenteditable="true"][role="textbox"]',
+    ];
+    const start = Date.now();
+    while (Date.now() - start < 20000) {
+      if (abortFlag) return null;
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el) return el;
+      }
+      dismissGeminiErrors();
+      await sleep(400);
+    }
+    return null;
+  }
+
+  async function findGeminiSendBtn() {
+    const sels = [
+      'button[aria-label*="Send" i]',
+      'button[aria-label*="submit" i]',
+      'button.send-button',
+      'button[mattooltip*="send" i]',
+      'button[data-testid*="send" i]',
+    ];
+    const start = Date.now();
+    while (Date.now() - start < 6000) {
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el && !el.disabled) return el.closest('button') || el;
+      }
+      await sleep(250);
+    }
+    return null;
+  }
+
+  async function injectIntoGeminiEditor(editor, text) {
+    try {
+      editor.focus();
+      editor.click();
+      await sleep(80);
+    } catch (_) {}
+
+    // Strategy 1: execCommand insertText
+    try {
+      if (editor.isContentEditable || editor.getAttribute('contenteditable') === 'true') {
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        await sleep(40);
+        const ok = document.execCommand('insertText', false, text);
+        await sleep(150);
+        if (ok && (editor.innerText || editor.textContent || '').trim().length > 20) return true;
+      }
+    } catch (_) {}
+
+    // Strategy 2: direct textContent + input event
+    try {
+      if (editor.isContentEditable) {
+        editor.innerHTML = '';
+        editor.textContent = text;
+        editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        await sleep(150);
+        if ((editor.innerText || editor.textContent || '').trim().length > 20) return true;
+      }
+    } catch (_) {}
+
+    // Strategy 3: <textarea>
+    try {
+      if (editor.tagName === 'TEXTAREA') {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(editor, text);
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        editor.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(150);
+        if ((editor.value || '').trim().length > 20) return true;
+      }
+    } catch (_) {}
+
+    // Strategy 4: synthetic paste event
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+      await sleep(200);
+      if ((editor.innerText || editor.textContent || editor.value || '').trim().length > 20) return true;
+    } catch (_) {}
+
+    return false;
   }
 
   async function sendToGeminiAndCapture(prompt) {
-    const textarea = await waitForElement(
-      'rich-textarea .ql-editor, textarea[aria-label]',
-      15000
-    );
-    if (!textarea) throw new Error('Gemini input not found');
-
-    textarea.focus();
-    document.execCommand('selectAll', false, null);
-    document.execCommand('insertText', false, prompt);
-    await sleep(400);
-
-    const sendBtn = await waitForElement(
-      'button[aria-label*="Send"], button.send-button',
-      5000
-    );
-    if (sendBtn) (sendBtn.closest('button') || sendBtn).click();
-    else textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-
-    const timeoutMs = imageConfig.maxWaitGeminiSec * 1000;
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
+    const maxTries = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxTries; attempt++) {
       if (abortFlag) return null;
-      await sleep(1500);
-      const img = document.querySelector(
-        'img[alt*="Generated"], img[data-generated], .model-response-text img, message-content img'
-      );
-      if (img && img.src && img.complete && img.naturalWidth > 50) {
-        return await urlToDataUrl(img.src);
+      // Always try to dismiss any stray "try again" popup first
+      dismissGeminiErrors();
+
+      log(`🎨 Gemini attempt ${attempt}/${maxTries}...`, 'img');
+
+      const editor = await findGeminiInput();
+      if (!editor) { lastErr = new Error('Gemini input not found'); await sleep(1500); continue; }
+
+      const injected = await injectIntoGeminiEditor(editor, prompt);
+      if (!injected) { lastErr = new Error('Gemini prompt injection failed'); await sleep(1500); continue; }
+
+      // Click send — fall back to pressing Enter
+      const sendBtn = await findGeminiSendBtn();
+      if (sendBtn) {
+        try { sendBtn.click(); } catch (_) {}
+      } else {
+        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
       }
+      await sleep(1500);
+
+      // Wait for image, dismissing any popup periodically
+      const timeoutMs = (imageConfig.maxWaitGeminiSec || 120) * 1000;
+      const started = Date.now();
+      let tryAgainSeen = false;
+      while (Date.now() - started < timeoutMs) {
+        if (abortFlag) return null;
+        await sleep(1500);
+
+        const err = dismissGeminiErrors();
+        if (err.saw && !tryAgainSeen) {
+          tryAgainSeen = true;
+          log('⚠ Gemini showed an error popup — dismissed, will retry prompt.', 'warn');
+          break; // break inner loop, outer attempt will resend
+        }
+
+        const img = document.querySelector(
+          'img[alt*="Generated"], img[data-generated], .model-response-text img, message-content img, img[src*="googleusercontent"]'
+        );
+        if (img && img.src && img.complete && img.naturalWidth > 50) {
+          log('✔ Gemini image detected — converting to data URL.', 'img');
+          return await urlToDataUrl(img.src);
+        }
+      }
+      if (!tryAgainSeen) lastErr = new Error(`Gemini image timeout after ${Math.round(timeoutMs/1000)}s`);
     }
-    throw new Error('Gemini image timeout');
+    throw lastErr || new Error('Gemini image failed after retries');
   }
 
   async function urlToDataUrl(url) {
@@ -3598,6 +3892,27 @@ Label every part. Textbook quality. No watermarks.`,
     renderRecent();
   }
 
+  // Checkpoint helpers — persist to storage so close/reload/new-tab can resume.
+  function saveCheckpoint(patch) {
+    if (patch && typeof patch === 'object') Object.assign(progress, patch);
+    saveObj(STORAGE_KEYS.PROGRESS, progress);
+  }
+
+  function resumeSummary() {
+    const p = progress || {};
+    if (!p.phase || p.phase === 'idle' || p.phase === 'done') return null;
+    const dIdx = (p.domainIdx || 0) + 1;
+    const dTotal = (domains && domains.length) || '?';
+    const parts = [`phase=${p.phase}`];
+    if (p.phase === 'domain') {
+      parts.push(`domain ${dIdx}/${dTotal}`);
+      parts.push(`sub=${p.subPhase}`);
+      if (p.subPhase === 'content') parts.push(`sub ${((p.subIdx||0)+1)}, page ${p.subPageDone||0}`);
+      if (p.subPhase === 'practice') parts.push(`Q ${p.practiceDone||0}/${practiceConfig.totalQuestions||0}`);
+    }
+    return parts.join(' · ');
+  }
+
   function pushRecent(page, status, detail) {
     progress.recent = progress.recent || [];
     progress.recent.unshift({ page, status, detail, ts: new Date().toLocaleTimeString() });
@@ -3634,7 +3949,9 @@ Label every part. Textbook quality. No watermarks.`,
 
     $('#sg-btn-start').disabled  = state === STATE.RUNNING || state === STATE.PAUSED;
     $('#sg-btn-pause').disabled  = state !== STATE.RUNNING;
-    $('#sg-btn-resume').disabled = state !== STATE.PAUSED;
+    // Allow Resume from PAUSED / ERROR / STOPPED so users can recover from
+    // network drops or GPT stream errors without starting over.
+    $('#sg-btn-resume').disabled = !(state === STATE.PAUSED || state === STATE.ERROR || state === STATE.STOPPED);
     $('#sg-btn-stop').disabled   = state === STATE.IDLE || state === STATE.STOPPED;
     $('#sg-btn-retry').disabled  = !(state === STATE.ERROR || state === STATE.PAUSED || state === STATE.STOPPED);
     $('#sg-btn-skip').disabled   = !(state === STATE.RUNNING || state === STATE.PAUSED);
@@ -3783,8 +4100,14 @@ Label every part. Textbook quality. No watermarks.`,
 
   function init() {
     try {
+      // If we're on gemini.google.com, run the Gemini-side listener and
+      // skip the heavy UI panel (it's only useful on ChatGPT).
+      const host = window.location.hostname;
+      if (host.includes('gemini.google.com') || host.includes('aistudio.google.com')) {
+        startGeminiSideWorker();
+        return;
+      }
       if (document.getElementById('sg-panel')) {
-        // Panel already mounted — just make sure it's visible and our refs are fresh.
         captureMountedNodes();
         return;
       }
@@ -3795,6 +4118,32 @@ Label every part. Textbook quality. No watermarks.`,
     } catch (err) {
       console.error('[StudyGuide] Init error:', err);
       try { alert('StudyGuide init failed: ' + err.message); } catch (_) {}
+    }
+  }
+
+  // Gemini-side worker: polls storage for a pending prompt, auto-injects it,
+  // captures the generated image, writes the data URL back to storage for the
+  // ChatGPT-side orchestrator to pick up.
+  async function startGeminiSideWorker() {
+    console.log('[StudyGuide] Gemini-side worker active.');
+    while (true) {
+      try {
+        const pending = GM_getValue(`${APP_ID}_pendingGeminiPrompt`, null);
+        if (pending && typeof pending === 'object' && pending.prompt) {
+          GM_setValue(`${APP_ID}_pendingGeminiPrompt`, null);
+          const { prompt, label } = pending;
+          console.log('[StudyGuide] Running Gemini prompt for label:', label);
+          try {
+            const dataUrl = await sendToGeminiAndCapture(prompt);
+            GM_setValue(`${APP_ID}_geminiResult_${label}`, dataUrl || null);
+            console.log('[StudyGuide] Gemini result posted for', label);
+          } catch (err) {
+            GM_setValue(`${APP_ID}_geminiResult_${label}`, null);
+            console.warn('[StudyGuide] Gemini capture failed:', err.message);
+          }
+        }
+      } catch (_) {}
+      await sleep(1500);
     }
   }
 
