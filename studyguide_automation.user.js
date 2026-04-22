@@ -1335,25 +1335,40 @@
   // ─────────────────────────────────────────────────────────────
   //  EVENTS
   // ─────────────────────────────────────────────────────────────
+  // Safe binder — logs + continues on missing element / error, so a single
+  // missing ID never breaks every other button on the panel.
+  function on(sel, ev, fn) {
+    try {
+      const el = (typeof sel === 'string') ? $(sel) : sel;
+      if (!el) { log(`⚠ bind: "${sel}" not found`, 'warn'); return; }
+      el.addEventListener(ev, (e) => {
+        try { return fn(e); }
+        catch (err) { log(`✗ handler ${sel}: ${err.message}`, 'error'); console.error(err); }
+      });
+    } catch (err) {
+      log(`✗ bind error ${sel}: ${err.message}`, 'error');
+    }
+  }
+
   function bindEvents() {
-    $('#sg-toggle-btn').addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); });
-    $('#sg-header').addEventListener('click', togglePanel);
-    $('#sg-close-btn').addEventListener('click', (e) => {
+    on('#sg-toggle-btn', 'click', (e) => { e.stopPropagation(); togglePanel(); });
+    on('#sg-header',     'click', togglePanel);
+    on('#sg-close-btn',  'click', (e) => {
       e.stopPropagation();
-      $('#sg-panel').style.display = 'none';
+      const p = $('#sg-panel'); if (p) p.style.display = 'none';
     });
 
     // Saves
-    $('#sg-save-exam').addEventListener('click', saveExamConfig);
-    $('#sg-save-image').addEventListener('click', saveImageConfig);
-    $('#sg-save-ref').addEventListener('click', saveRefConfig);
-    $('#sg-save-docs').addEventListener('click', saveDocsConfig);
-    const tcBtn = $('#sg-test-conn'); if (tcBtn) tcBtn.addEventListener('click', testDocsConnection);
-    $('#sg-save-practice').addEventListener('click', savePracticeConfig);
-    $('#sg-gen-practice').addEventListener('click', generatePracticeQuestions);
-    $('#sg-save-sample').addEventListener('click', saveSampleMapping);
-    $('#sg-sm-reset').addEventListener('click', resetSampleMapping);
-    $('#sg-sm-detect').addEventListener('click', autoDetectSampleMapping);
+    on('#sg-save-exam',     'click', saveExamConfig);
+    on('#sg-save-image',    'click', saveImageConfig);
+    on('#sg-save-ref',      'click', saveRefConfig);
+    on('#sg-save-docs',     'click', saveDocsConfig);
+    on('#sg-test-conn',     'click', testDocsConnection);
+    on('#sg-save-practice', 'click', savePracticeConfig);
+    on('#sg-gen-practice',  'click', generatePracticeQuestions);
+    on('#sg-save-sample',   'click', saveSampleMapping);
+    on('#sg-sm-reset',      'click', resetSampleMapping);
+    on('#sg-sm-detect',     'click', autoDetectSampleMapping);
 
     // Toggles — clicking flips state and auto-saves immediately.
     bindToggle('tog-enableGemini',          imageConfig, 'enableGemini',          STORAGE_KEYS.IMAGE_CONFIG);
@@ -1370,53 +1385,45 @@
     bindToggle('tog-autoStopOnMissing',   refConfig, 'autoStopOnMissing',   STORAGE_KEYS.REF_CONFIG);
 
     // Domains
-    $('#sg-add-domain').addEventListener('click', () => {
+    on('#sg-add-domain', 'click', () => {
       domains.push({ name: '', weight: 0 });
       saveObj(STORAGE_KEYS.DOMAINS, domains);
       renderDomains();
     });
-    $('#sg-detect-domains').addEventListener('click', autoDetectDomains);
+    on('#sg-detect-domains', 'click', autoDetectDomains);
 
     // Workflow
-    $('#sg-open-outline').addEventListener('click', () => openGPTForUpload('outline'));
-    $('#sg-confirm-outline').addEventListener('click', () => confirmUpload('outline'));
-    $('#sg-open-books').addEventListener('click', () => openGPTForUpload('books'));
-    $('#sg-confirm-books').addEventListener('click', () => confirmUpload('books'));
-    $('#sg-open-samples').addEventListener('click', () => openGPTForUpload('samples'));
-    $('#sg-confirm-samples').addEventListener('click', () => confirmUpload('samples'));
+    on('#sg-open-outline',    'click', () => openGPTForUpload('outline'));
+    on('#sg-confirm-outline', 'click', () => confirmUpload('outline'));
+    on('#sg-open-books',      'click', () => openGPTForUpload('books'));
+    on('#sg-confirm-books',   'click', () => confirmUpload('books'));
+    on('#sg-open-samples',    'click', () => openGPTForUpload('samples'));
+    on('#sg-confirm-samples', 'click', () => confirmUpload('samples'));
 
     // Auto-generate + controls
-    $('#sg-auto-generate').addEventListener('click', autoGenerate);
-    $('#sg-btn-verify').addEventListener('click', startExamVerification);
-    $('#sg-btn-start').addEventListener('click', startGeneration);
-    $('#sg-btn-pause').addEventListener('click', pauseGeneration);
-    $('#sg-btn-resume').addEventListener('click', resumeGeneration);
-    $('#sg-btn-retry').addEventListener('click', retryPage);
-    $('#sg-btn-skip').addEventListener('click', skipPage);
-    $('#sg-btn-stop').addEventListener('click', stopGeneration);
-    $('#sg-btn-reset').addEventListener('click', resetEverything);
+    on('#sg-auto-generate','click', autoGenerate);
+    on('#sg-btn-verify',   'click', startExamVerification);
+    on('#sg-btn-start',    'click', startGeneration);
+    on('#sg-btn-pause',    'click', pauseGeneration);
+    on('#sg-btn-resume',   'click', resumeGeneration);
+    on('#sg-btn-retry',    'click', retryPage);
+    on('#sg-btn-skip',     'click', skipPage);
+    on('#sg-btn-stop',     'click', stopGeneration);
+    on('#sg-btn-reset',    'click', resetEverything);
 
     // Console
-    $('#sg-clear-console').addEventListener('click', () => {
-      $('#sg-console').innerHTML = '';
+    on('#sg-clear-console', 'click', () => {
+      const c = $('#sg-console'); if (c) c.innerHTML = '';
       log('Console cleared.', 'sys');
     });
 
     // Popup
-    $('#sg-popup-upload').addEventListener('click', () => {
-      hidePopup();
-      openGPTForUpload('missing');
-    });
-    $('#sg-popup-skip').addEventListener('click', () => {
-      hidePopup();
-      skipPage();
-    });
+    on('#sg-popup-upload', 'click', () => { hidePopup(); openGPTForUpload('missing'); });
+    on('#sg-popup-skip',   'click', () => { hidePopup(); skipPage(); });
 
     // Book popup
-    $('#sg-book-popup-add').addEventListener('click', () => {
-      openGPTForUpload('new-book');
-    });
-    $('#sg-book-popup-confirm').addEventListener('click', () => {
+    on('#sg-book-popup-add',     'click', () => openGPTForUpload('new-book'));
+    on('#sg-book-popup-confirm', 'click', () => {
       if (pendingConfirm.newBook) { pendingConfirm.newBook(); pendingConfirm.newBook = null; }
       hideBookPopup();
       log('✔ New book confirmed. Re-checking coverage...', 'ok');
@@ -2339,8 +2346,20 @@ Rules: Include an image prompt ONLY if the page truly requires a diagram / chart
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  PRACTICE QUESTIONS (per domain, weighted by sample mapping)
+  //  PRACTICE QUESTIONS
   // ─────────────────────────────────────────────────────────────
+  async function generatePracticeQuestions() {
+    if (!examConfig.examName) { log('⚠ Set Exam Name first.', 'warn'); return; }
+    if (!domains || !domains.length) { log('⚠ No domains yet — run Start Generation first.', 'warn'); return; }
+    if (!isOnGPT()) { log('⚠ Open chatgpt.com to generate practice questions.', 'warn'); return; }
+    log(`🎓 Generating practice questions for ${domains.length} domain(s)...`, 'info');
+    for (let i = 0; i < domains.length; i++) {
+      if (abortFlag) break;
+      await generatePracticeQuestionsForDomain(domains[i], i + 1);
+    }
+    log('✔ Practice-question generation complete.', 'ok');
+  }
+
   async function generatePracticeQuestionsForDomain(domain, domainNum) {
     const subCount   = (domain.subdomains || []).length;
     const perSubRule = 10;                                  // 10 per subdomain baseline
@@ -3260,9 +3279,27 @@ Label every part. Textbook quality. No watermarks.`,
   //  INIT
   // ─────────────────────────────────────────────────────────────
   function init() {
-    buildUI();
-    log('🟢 StudyGuide AI v13 loaded — Text + Gemini Images pipeline ready.', 'ok');
+    try {
+      if (document.getElementById('sg-panel')) {
+        console.warn('[StudyGuide] Panel already present — skipping re-init.');
+        return;
+      }
+      buildUI();
+      log('🟢 StudyGuide AI v13 loaded — Text + Gemini Images pipeline ready.', 'ok');
+    } catch (err) {
+      console.error('[StudyGuide] Init error:', err);
+      // Best-effort surface via alert for visibility if log panel failed to mount
+      try { alert('StudyGuide init failed: ' + err.message); } catch (_) {}
+    }
   }
+
+  // Install global error listeners so runtime errors are visible in the console
+  window.addEventListener('error', (e) => {
+    try { log(`✗ JS error: ${e.message} (${e.filename}:${e.lineno})`, 'error'); } catch (_) {}
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    try { log(`✗ Unhandled promise rejection: ${e.reason && e.reason.message || e.reason}`, 'error'); } catch (_) {}
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
