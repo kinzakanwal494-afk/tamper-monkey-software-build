@@ -4124,10 +4124,18 @@ Label every part. Textbook quality. No watermarks.`,
 
   function stripSourceMentions(text) {
     return text
+      // Full "SOURCE: ..." trailing line that the prompt forces on every page
+      .replace(/^\s*SOURCE\s*:.*$/gmi, '')
+      // Bracketed source citations GPT sometimes adds inline
+      .replace(/\[source\s*:[^\]]+\]/gi, '')
       .replace(/\(see\s+[^)]+?(page|chapter)\s+\d+[^)]*\)/gi, '')
-      .replace(/\[source:[^\]]+\]/gi, '')
+      // Phrases that leak the book / author into the body
       .replace(/according to the reference[^.]*\./gi, '')
       .replace(/as stated in [^.]+\./gi, '')
+      // Acknowledgement echoes that occasionally leak through
+      .replace(/^\s*(RULES|OUTLINE|SAMPLES|REFERENCE[_\s]*BOOKS?|DOMAIN)[\s_]*(ACKNOWLEDGED|CONFIRMED).*$/gmi, '')
+      // Collapse any resulting triple blank lines
+      .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
 
