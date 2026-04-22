@@ -145,24 +145,29 @@
   // ─────────────────────────────────────────────────────────────
   GM_addStyle(`
     #sg-panel {
-      position: fixed;
-      top: 70px;
-      right: 16px;
-      width: 420px;
-      max-height: 92vh;
-      background: #0b1220;
-      color: #e2e8f0;
-      border: 1px solid #1e293b;
-      border-radius: 14px;
-      box-shadow: 0 25px 60px rgba(0,0,0,0.65);
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 13px;
-      z-index: 2147483647;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
+      position: fixed !important;
+      top: 70px !important;
+      right: 16px !important;
+      width: 420px !important;
+      max-height: 92vh !important;
+      background: #0b1220 !important;
+      color: #e2e8f0 !important;
+      border: 1px solid #1e293b !important;
+      border-radius: 14px !important;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.65) !important;
+      font-family: 'Segoe UI', system-ui, sans-serif !important;
+      font-size: 13px !important;
+      z-index: 2147483647 !important;
+      display: flex !important;
+      flex-direction: column !important;
+      overflow: hidden !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+      pointer-events: auto !important;
+      transform: none !important;
     }
-    #sg-panel.collapsed { max-height: 50px; }
+    #sg-panel.collapsed { max-height: 50px !important; }
+    #sg-panel[hidden], #sg-panel.sg-hide { display: none !important; }
     #sg-header {
       background: linear-gradient(135deg, #1e3a5f, #0f4c81);
       padding: 11px 14px;
@@ -1199,7 +1204,7 @@
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       const p = document.getElementById('sg-panel');
-      if (p) { p.style.display = 'flex'; p.classList.remove('collapsed'); }
+      if (p) { p.classList.remove('sg-hide', 'collapsed'); p.style.display = ''; }
       b.style.display = 'none';
     });
     document.body.appendChild(b);
@@ -1207,7 +1212,7 @@
 
   function closePanel() {
     const p = document.getElementById('sg-panel');
-    if (p) p.style.display = 'none';
+    if (p) p.classList.add('sg-hide');
     const r = document.getElementById('sg-restore-btn');
     if (r) r.style.display = 'block';
   }
@@ -3725,17 +3730,70 @@ Label every part. Textbook quality. No watermarks.`,
   // ─────────────────────────────────────────────────────────────
   //  INIT
   // ─────────────────────────────────────────────────────────────
+  // Keep a reference to our DOM nodes so we can re-attach them if ChatGPT's
+  // React tree re-renders document.body and nukes them.
+  let _sgPanelEl = null;
+  let _sgOverlayEls = [];
+  let _sgRestoreEl = null;
+
+  function captureMountedNodes() {
+    _sgPanelEl   = document.getElementById('sg-panel');
+    _sgOverlayEls = [
+      document.getElementById('sg-popup-overlay'),
+      document.getElementById('sg-book-popup-overlay'),
+    ].filter(Boolean);
+    _sgRestoreEl = document.getElementById('sg-restore-btn');
+  }
+
+  // Re-attach our nodes to document.body if they were removed by a React
+  // re-render. Runs cheaply in a MutationObserver.
+  function ensureMounted() {
+    if (!document.body) return;
+    if (_sgPanelEl && _sgPanelEl.isConnected === false) {
+      document.body.appendChild(_sgPanelEl);
+    }
+    _sgOverlayEls.forEach(el => {
+      if (el && el.isConnected === false) document.body.appendChild(el);
+    });
+    if (_sgRestoreEl && _sgRestoreEl.isConnected === false) {
+      document.body.appendChild(_sgRestoreEl);
+    }
+    // If somehow everything is gone, rebuild from scratch
+    if (!document.getElementById('sg-panel')) {
+      try {
+        buildUI();
+        captureMountedNodes();
+        console.warn('[StudyGuide] Panel was removed by the host page — rebuilt.');
+      } catch (err) {
+        console.error('[StudyGuide] Rebuild failed:', err);
+      }
+    }
+  }
+
+  function startMountGuard() {
+    try {
+      const mo = new MutationObserver(() => ensureMounted());
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      // Also a low-frequency safety tick in case the observer is throttled
+      setInterval(ensureMounted, 2000);
+    } catch (err) {
+      console.error('[StudyGuide] Mount guard failed:', err);
+    }
+  }
+
   function init() {
     try {
       if (document.getElementById('sg-panel')) {
-        console.warn('[StudyGuide] Panel already present — skipping re-init.');
+        // Panel already mounted — just make sure it's visible and our refs are fresh.
+        captureMountedNodes();
         return;
       }
       buildUI();
+      captureMountedNodes();
+      startMountGuard();
       log('🟢 StudyGuide AI v13 loaded — Text + Gemini Images pipeline ready.', 'ok');
     } catch (err) {
       console.error('[StudyGuide] Init error:', err);
-      // Best-effort surface via alert for visibility if log panel failed to mount
       try { alert('StudyGuide init failed: ' + err.message); } catch (_) {}
     }
   }
@@ -3748,9 +3806,31 @@ Label every part. Textbook quality. No watermarks.`,
     try { log(`✗ Unhandled promise rejection: ${e.reason && e.reason.message || e.reason}`, 'error'); } catch (_) {}
   });
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    setTimeout(init, 1200);
+  // Robust init: wait for document.body + ChatGPT's React mount to settle,
+  // then run init. This avoids the "panel flashes then disappears" race where
+  // we mount before ChatGPT's first paint and it wipes document.body.
+  function scheduleInit() {
+    if (!document.body) {
+      document.addEventListener('DOMContentLoaded', scheduleInit, { once: true });
+      return;
+    }
+    // Wait for a ChatGPT-specific anchor (composer / main / textarea) to appear,
+    // then wait one more animation frame + 800ms for React hydration.
+    const readyMarkers = ['#prompt-textarea', 'main', '[contenteditable="true"]'];
+    const hasMarker = () => readyMarkers.some(s => document.querySelector(s));
+    if (hasMarker()) {
+      requestAnimationFrame(() => setTimeout(init, 800));
+      return;
+    }
+    let tries = 0;
+    const poll = setInterval(() => {
+      tries++;
+      if (hasMarker() || tries > 40) {
+        clearInterval(poll);
+        requestAnimationFrame(() => setTimeout(init, 800));
+      }
+    }, 400);
   }
+
+  scheduleInit();
 })();
