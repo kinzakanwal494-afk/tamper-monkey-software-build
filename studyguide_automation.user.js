@@ -2097,21 +2097,54 @@ Do NOT generate anything yet. Reply ONLY: RULES ACKNOWLEDGED — READY FOR OUTLI
         if (!/RULES\s+ACKNOWLEDGED/i.test(ackResp)) log('⚠ GPT did not acknowledge rules verbatim — continuing.', 'warn');
         else log('✔ GPT acknowledged rules.', 'ok');
         subjectRulesAcknowledged = true;
-        saveCheckpoint({ phase: 'outline' });
+        saveCheckpoint({ phase: 'intro' });
       } else {
         log('⏭ Skip: rules already injected.', 'sys');
       }
 
-      // 2) Outline upload
+      // 1b) Author Introduction page (front matter — no outline required)
+      if (phaseBefore('intro') === false) {
+        await generateAuthorIntroPage();
+        saveCheckpoint({ phase: 'copyright' });
+      } else {
+        log('⏭ Skip: author introduction already written.', 'sys');
+      }
+
+      // 1c) Copyright page with Disclaimer
+      if (phaseBefore('copyright') === false) {
+        await generateCopyrightPage();
+        saveCheckpoint({ phase: 'outline' });
+      } else {
+        log('⏭ Skip: copyright page already written.', 'sys');
+      }
+
+      // 2) Outline upload — popup prompting user to upload
       if (phaseBefore('outline') === false) {
         showStepNotify('Upload Exam Outline', 'Open ChatGPT + button, upload the outline PDF, then click "✓ Confirm Outline".');
         notify('Upload exam outline to ChatGPT now.');
         log('⏸ Waiting for outline upload + confirmation...', 'warn');
         await waitForConfirm('outline');
         if (abortFlag) throw new Error('Aborted');
-        saveCheckpoint({ phase: 'mapping' });
+        saveCheckpoint({ phase: 'how_to_use' });
       } else {
         log('⏭ Skip: outline already confirmed.', 'sys');
+      }
+
+      // 2b) How-To-Use-This-Book page (after outline is uploaded so GPT
+      //     can reflect the exam structure accurately)
+      if (phaseBefore('how_to_use') === false) {
+        await generateHowToUsePage();
+        saveCheckpoint({ phase: 'why_trust' });
+      } else {
+        log('⏭ Skip: how-to-use page already written.', 'sys');
+      }
+
+      // 2c) Why-Trust-This-Study-Guide page
+      if (phaseBefore('why_trust') === false) {
+        await generateWhyTrustPage();
+        saveCheckpoint({ phase: 'mapping' });
+      } else {
+        log('⏭ Skip: why-trust page already written.', 'sys');
       }
 
       // 3) Domain mapping
@@ -2208,8 +2241,13 @@ Then STOP — do not output anything else.`);
         while (!verifyOK && !abortFlag) {
         verifyTries++;
         const verifyResp = await sendToGPT(`List every reference book you currently have access to (title + author if possible).
-Then cross-check EVERY domain and subdomain from the mapping above and say for each whether the reference data is:
-  COMPLETE | PARTIAL | MISSING
+Then cross-check EVERY domain and subdomain from the mapping above and say for each whether the reference data is COMPLETE, PARTIAL, or MISSING.
+
+CRITICAL RULES:
+- Do NOT fill gaps from your training data.
+- Do NOT guess. Open each uploaded book's content panel and confirm before answering.
+- If you cannot clearly locate a subdomain's content in the actual uploaded books, mark it MISSING — do not mark COMPLETE just because the topic feels familiar.
+- Any MISSING subdomain will cause the orchestrator to pause and request a new reference book. Do not write generic content to avoid a pause — pausing is the CORRECT action.
 
 Return STRICT JSON only:
 {
@@ -2325,7 +2363,7 @@ Then re-check only the previously MISSING items. Reply STRICT JSON:
   }
 
   // ── Phase comparators — return true if the already-saved phase is AFTER the given one ──
-  const PHASE_ORDER = ['idle','rules','outline','mapping','alloc','samples','sample_mapping','books','verify','domain','done'];
+  const PHASE_ORDER = ['idle','rules','intro','copyright','outline','how_to_use','why_trust','mapping','alloc','samples','sample_mapping','books','verify','domain','done'];
   function phaseBefore(p) {
     const cur = PHASE_ORDER.indexOf(progress.phase || 'idle');
     const tgt = PHASE_ORDER.indexOf(p);
@@ -2506,7 +2544,82 @@ WRITING STYLE — MANDATORY, ZERO EXCEPTIONS:
 - Do NOT mention books, chapters, authors, companies, or brands by name inside the body ("According to X", "Company Y uses", "This chapter explains").
 - Write in a neutral, professional, educational tone — just the concept, its mechanism, and an illustrative example.
 - Every paragraph must leave the reader with a clear conceptual understanding of the topic.
-- If a concept is not supported by the uploaded books, output: "REFERENCE_NOT_FOUND: <topic>".
+- IF the required concept is NOT supported by the uploaded reference books, DO NOT invent, guess, generalise from training data, or write generic filler. Instead emit EXACTLY this line on its own, nothing else:
+    REFERENCE_NOT_FOUND: <the specific topic you cannot find>
+  The orchestrator will pause, request a fresh reference book from the user, and resume. This is mandatory — a hallucinated page is worse than a paused page.
+`;
+
+  // ─────────────────────────────────────────────────────────────
+  //  MARKUP CONTRACT — every page-level prompt includes this so the
+  //  Apps-Script formatter can convert GPT output to rich Google Docs.
+  //  Every visual element has exactly ONE canonical syntax.
+  // ─────────────────────────────────────────────────────────────
+  const MARKUP_CONTRACT = `
+MARKUP CONTRACT — follow these EXACT syntaxes, nothing else:
+
+1. HEADINGS:
+   #Domain-N: Name            (Heading 1 — only on first page of a domain)
+   ##Subdomain-N.M: Name      (Heading 2 — only on first page of a subdomain)
+   ###Specific Topic          (Heading 3 — every topic section)
+   NEVER use bold (**text**) as a heading. NEVER use plain text as a heading.
+
+2. PARAGRAPHS:
+   Plain prose, blank line between paragraphs. No indentation.
+
+3. BOLD / ITALIC inside prose:
+   **bold term**        — for definitions and key terms
+   *italic term*        — for emphasis / foreign terms
+   Use sparingly; never stack.
+
+4. BULLET / NUMBERED LISTS:
+   - item            (bulleted list — use hyphen + space)
+   1. item           (numbered list — use digit + period + space)
+   Do NOT mix bullet chars (• ● ○ are BANNED — use "-" only).
+
+5. TABLES (ALWAYS use this shape — parser depends on it):
+   | Header A | Header B | Header C |
+   |----------|----------|----------|
+   | val1     | val2     | val3     |
+   - Header separator row MUST use hyphens and pipes exactly.
+   - Keep every cell on one line. No line breaks inside cells.
+   - No merged cells. No colspan/rowspan tricks.
+
+6. INLINE MATH:   use $...$   e.g. "the area is $A = \\pi r^2$".
+   BLOCK MATH:    use $$...$$ on its own line(s), e.g.
+     $$
+     \\frac{d}{dx} e^{x^2} = 2x\\,e^{x^2}
+     $$
+
+7. CHEMICAL REACTIONS (always balanced, always with state symbols):
+   \`\`\`chem
+   2H_2(g) + O_2(g) -> 2H_2O(l)     [ΔH = -571.6 kJ]
+   \`\`\`
+   Use "->" for forward, "<->" for reversible. Subscripts as H_2, superscripts as Ca^{2+}.
+
+8. CODE BLOCKS (language tag MANDATORY):
+   \`\`\`python
+   def foo(x):
+       return x * 2
+   \`\`\`
+   Include expected output in a second fence labelled "output":
+   \`\`\`output
+   4
+   \`\`\`
+
+9. FIGURES (placeholder the script will replace with a Gemini image):
+   [FIGURE: <short title>]
+   <one-paragraph detailed description of what the figure shows>
+   [/FIGURE]
+
+10. CALLOUT BLOCKS (optional, for tips / warnings / definitions):
+    > NOTE: short note text
+    > WARNING: short warning text
+    > DEFINITION: term — definition
+
+11. SOURCE LINE (last line of every content page, exactly):
+    SOURCE: <Book Title> | Chapter: <chapter> | Pages: <range>
+
+Do NOT invent other syntax. Do NOT use HTML tags. Do NOT use emoji bullets.
 `;
 
   // ─────────────────────────────────────────────────────────────
@@ -2526,6 +2639,7 @@ CONTENT SCOPE:
 - Explain what the domain as a whole is about and how its sub-areas connect together.
 
 ${STYLE_RULES}
+${MARKUP_CONTRACT}
 
 STRUCTURE RULES:
 - Target ~500 words on this page.
@@ -2554,6 +2668,7 @@ CONTENT SCOPE:
 - Explain, in flowing prose, why this domain exists, what problems it solves, and what overall outcomes its study is meant to achieve.
 
 ${STYLE_RULES}
+${MARKUP_CONTRACT}
 
 STRUCTURE RULES:
 - Begin with exactly:
@@ -2583,6 +2698,7 @@ CONTENT:
 - "Depth of coverage" = one of: Foundational / Intermediate / Advanced — plus a very short reason.
 
 ${STYLE_RULES}
+${MARKUP_CONTRACT}
 
 STRICT FORMAT:
 - ONLY the "###Target Covered" heading at the top, then the table.
@@ -2606,6 +2722,7 @@ CONTENT:
 - Each definition must be a single, self-contained line that is enough to recall the concept.
 
 ${STYLE_RULES}
+${MARKUP_CONTRACT}
 
 STRICT FORMAT:
 - ONLY the "###Memory Check" heading at the top, then the table.
@@ -2617,6 +2734,145 @@ Return the markdown only.`;
       label:      `memory_check_d${domainNum}`,
       allowImages:false,
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  FRONT-MATTER GENERATORS
+  //  Intro → Copyright → How-To-Use → Why-Trust (book preamble)
+  // ─────────────────────────────────────────────────────────────
+  async function generateAuthorIntroPage() {
+    log(`✍ Author Introduction page (1 page × 450–500 words)...`, 'info');
+    const prompt = `Write the AUTHOR INTRODUCTION page for the study guide of "${examConfig.examName}".
+
+LENGTH:
+- Exactly 450–500 words. Enough to fully fill one printed page at font size 11.
+
+HEADING (exactly):
+###Author Introduction
+
+VOICE & TONE:
+- STRICTLY third person. No first-person ("I", "we", "our"), no reader address ("you").
+- No personal names, no biographical details, no autobiographical disclosure, no casual tone.
+- Polished, authoritative, educational-publishing style.
+
+FRAMING:
+- Present a single lead expert working collaboratively with a specialised academic team.
+- Communicate instructional authority, subject mastery, exam familiarity, pedagogical depth, and measurable commitment to student success.
+- Opening paragraph must be DISTINCT and EXAM-SPECIFIC to "${examConfig.examName}". Do not use generic openings recycled from other study guides.
+- Reflect the nature, difficulty level, audience expectations, and academic/professional significance of "${examConfig.examName}".
+- Vary sentence structure and paragraph rhythm — this should not read like a template.
+
+${MARKUP_CONTRACT}
+
+CONSTRAINTS:
+- Plain prose only. No lists, no tables, no figures, no code blocks.
+- Start immediately with "###Author Introduction" followed by the prose.
+- Do NOT include a SOURCE line on this page (front matter has no source citation).
+
+Write the page now.`;
+    await runAndPostPage({ promptText: prompt, label: 'front_author_intro', allowImages: false });
+  }
+
+  async function generateCopyrightPage() {
+    log(`©  Copyright page (1 page × 450–500 words) with Disclaimer...`, 'info');
+    const prompt = `Write the COPYRIGHT page for the study guide of "${examConfig.examName}".
+
+LENGTH:
+- Exactly 450–500 words total.
+
+HEADING (exactly):
+###Copyright
+
+CONTENT — in this order, as natural flowing paragraphs (NOT bulleted):
+1. Standard copyright notice (current year, professional educational-publisher language, reservation of rights).
+2. Permissions and restrictions on reproduction, distribution, and derivative works.
+3. Trademark and intellectual-property statement relevant to the exam subject.
+4. Accuracy statement (best-effort preparation, periodic revision, no guarantee of exam outcome).
+5. Attribution to reference materials used, without naming specific authors or publishers.
+6. Contact / permissions-request paragraph (generic — no real email or address).
+
+FINAL TWO LINES — EXACTLY:
+- The PENULTIMATE line must be the bolded label (use markdown bold):
+  **DISCLAIMER**
+- The FINAL line(s) must be a tailored disclaimer specific to "${examConfig.examName}":
+   - Name the exam explicitly.
+   - State that this study guide is an independent educational work, not affiliated with, endorsed by, or sponsored by the exam's governing body.
+   - State that passing the exam depends on the candidate's own preparation and judgement.
+   - Keep this disclaimer concise (2–4 sentences) and exam-specific.
+
+VOICE:
+- Formal publishing tone. Third person. No personal voice. No casual language.
+
+${MARKUP_CONTRACT}
+
+CONSTRAINTS:
+- No tables, no figures, no code.
+- Do NOT include a SOURCE line.
+
+Write the page now.`;
+    await runAndPostPage({ promptText: prompt, label: 'front_copyright', allowImages: false });
+  }
+
+  async function generateHowToUsePage() {
+    log(`📘 "How to Use This Book" page (1 page × 450–500 words)...`, 'info');
+    const prompt = `Write the "HOW TO USE THIS BOOK" page for the study guide of "${examConfig.examName}".
+
+LENGTH:
+- Exactly 450–500 words.
+
+HEADING (exactly):
+###How to Use This Book
+
+CONTENT:
+- Explain the structure of the study guide: domains, subdomains, topic pages, tables, memory checks, practice questions.
+- Explain how a candidate should progress — reading order, using the purpose and target-covered tables, using memory-check tables for revision, using practice questions for self-assessment.
+- Explain how to interpret images, figures, equations, and reactions when they appear.
+- Explain a recommended study cadence tied to the difficulty of "${examConfig.examName}" (e.g. weekly domain blocks, revision sprints, practice-question cycles). Tailor specifics to this exam's nature.
+- End with a short paragraph reinforcing disciplined, reference-grounded study.
+
+VOICE:
+- Third person. Formal, instructive, exam-publishing tone. No "you".
+- Paragraphs ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each.
+
+${MARKUP_CONTRACT}
+
+CONSTRAINTS:
+- Plain prose. One short numbered list (up to 5 items) is allowed if it improves clarity, but prose is preferred.
+- No figures, no code, no math, no tables.
+- Do NOT include a SOURCE line.
+
+Write the page now.`;
+    await runAndPostPage({ promptText: prompt, label: 'front_how_to_use', allowImages: false });
+  }
+
+  async function generateWhyTrustPage() {
+    log(`🛡  "Why Trust This Study Guide" page (1 page × 450–500 words)...`, 'info');
+    const prompt = `Write the "WHY TRUST THIS STUDY GUIDE" page for the study guide of "${examConfig.examName}".
+
+LENGTH:
+- Exactly 450–500 words.
+
+HEADING (exactly):
+###Why Trust This Study Guide
+
+CONTENT:
+- Explain why a candidate preparing for "${examConfig.examName}" can rely on this book.
+- Cover measurable signals of quality: alignment with the official exam outline and weightings, grounding in authoritative reference texts, structured domain-by-domain coverage, integrated memory-check tables, weighted practice questions sampled from the exam's real question distribution, and methodology for iterative quality review.
+- Convey the depth of subject-matter preparation, the academic-team collaboration, and the commitment to ongoing accuracy revisions.
+- Communicate outcomes focus — designed to move a candidate from concept familiarity to exam readiness.
+- Avoid naming any individual author, company, publisher or brand. Avoid vague marketing phrases ("the best in the industry"). Keep it concrete and evidence-based.
+
+VOICE:
+- Third person, confident, scholarly. No first-person, no direct reader address.
+
+${MARKUP_CONTRACT}
+
+CONSTRAINTS:
+- Plain prose only. No tables, no figures, no code.
+- Do NOT include a SOURCE line.
+
+Write the page now.`;
+    await runAndPostPage({ promptText: prompt, label: 'front_why_trust', allowImages: false });
   }
 
   async function generateSubdomainContent(domain, domainNum, sub, subNum, isFirstSubOfDomain, skipPages = 0) {
@@ -2639,6 +2895,7 @@ Return the markdown only.`;
 Absolute book page: ${absPage} of ${examConfig.totalPages}.
 
 ${STYLE_RULES}
+${MARKUP_CONTRACT}
 
 STRUCTURE RULES:
 - Target ~${examConfig.wordsPerPage} words on this page.
@@ -2678,21 +2935,39 @@ Reply with the page content only.`;
     }
 
     try {
-      const raw = await sendToGPT(promptText);
+      let raw = await sendToGPT(promptText);
 
-      if (refConfig.autoStopOnMissing && detectMissingReference(raw)) {
-        log(`⚠ Missing reference for ${label}. Showing popup.`, 'warn');
-        showPopup('⚠ Missing Reference',
-          `GPT could not find required content for ${label}. Upload the missing reference or skip this page.`);
+      // Missing-reference loop: GPT returned "REFERENCE_NOT_FOUND: <topic>".
+      // Show the book popup so the user can upload the missing book, tell GPT
+      // to ingest it, then re-send the same prompt. Up to 3 attempts.
+      let missingAttempts = 0;
+      while (refConfig.autoStopOnMissing && detectMissingReference(raw) && !abortFlag && missingAttempts < 3) {
+        missingAttempts++;
+        const topicMatch = raw.match(/REFERENCE_NOT_FOUND\s*:\s*([^\n]+)/i);
+        const missingTopic = topicMatch ? topicMatch[1].trim() : `(page ${label})`;
+        log(`⚠ GPT reports REFERENCE_NOT_FOUND for "${missingTopic}" (attempt ${missingAttempts}/3). Prompting user for a book.`, 'warn');
+        showStepNotify('Missing Reference', `Upload the missing book covering: ${missingTopic}`);
         setUIState(STATE.PAUSED);
-        while (pauseFlag || currentState === STATE.PAUSED) {
-          await sleep(400);
-          if (abortFlag || skipFlag) break;
-        }
-        hidePopup();
-        if (skipFlag) { skipFlag = false; progress.skipped++; updateProgressUI(); return; }
+        await showBookPopup([missingTopic]);
+        hideBookPopup();
+        hideStepNotify();
         if (abortFlag) return;
         setUIState(STATE.RUNNING);
+
+        // Tell GPT a new book was uploaded and ask it to ingest + retry
+        try {
+          await sendToGPT(`A new reference book has just been uploaded. Read it fully. Then regenerate the previous page — referring to the new book if it now contains the required content. If the topic is STILL missing, emit REFERENCE_NOT_FOUND: <topic> again.`);
+        } catch (_) {}
+        raw = await sendToGPT(promptText);
+      }
+
+      if (refConfig.autoStopOnMissing && detectMissingReference(raw)) {
+        // After 3 attempts, skip the page rather than loop forever.
+        log(`✗ Still missing reference after ${missingAttempts} attempts — skipping ${label}.`, 'error');
+        progress.skipped++;
+        saveObj(STORAGE_KEYS.PROGRESS, progress);
+        updateProgressUI();
+        return;
       }
 
       let text = raw;
