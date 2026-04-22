@@ -840,6 +840,25 @@
   let practiceConfig = loadObj(STORAGE_KEYS.PRACTICE_CONFIG, DEFAULT_PRACTICE_CONFIG);
   let sampleMapping  = loadObj(STORAGE_KEYS.SAMPLE_MAPPING,  DEFAULT_SAMPLE_MAPPING);
 
+  // Recover from the old index-keyed-object bug: if prior versions of the
+  // script stored `domains` as { "0": {...}, "1": {...} } instead of a real
+  // array, convert it back now so .map / .reduce / .forEach don't throw.
+  if (!Array.isArray(domains)) {
+    try {
+      if (domains && typeof domains === 'object') {
+        const arr = Object.keys(domains)
+          .filter(k => /^\d+$/.test(k))
+          .sort((a, b) => +a - +b)
+          .map(k => domains[k]);
+        domains = arr;
+      } else {
+        domains = [];
+      }
+    } catch (_) { domains = []; }
+    saveObj(STORAGE_KEYS.DOMAINS, domains);
+    console.warn('[StudyGuide] Recovered domains[] from legacy storage shape.');
+  }
+
   // ─────────────────────────────────────────────────────────────
   //  UI BUILD
   // ─────────────────────────────────────────────────────────────
@@ -4338,12 +4357,27 @@ Label every part. Textbook quality. No watermarks.`,
   function $(sel) { return document.querySelector(sel); }
 
   function loadObj(key, fallback) {
+    const clone = () => {
+      try { return JSON.parse(JSON.stringify(fallback)); }
+      catch (_) { return fallback; }
+    };
     try {
       const raw = GM_getValue(key, null);
-      if (!raw) return JSON.parse(JSON.stringify(fallback));
-      return { ...JSON.parse(JSON.stringify(fallback)), ...JSON.parse(raw) };
-    } catch {
-      return JSON.parse(JSON.stringify(fallback));
+      if (!raw) return clone();
+      const parsed = JSON.parse(raw);
+      // Array fallback → return the stored array as-is (no object merging,
+      // otherwise `[{...}, {...}]` gets flattened into an index-keyed
+      // object and later breaks .reduce / .map / .forEach).
+      if (Array.isArray(fallback)) {
+        return Array.isArray(parsed) ? parsed : clone();
+      }
+      // Object fallback → shallow-merge stored fields over defaults.
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ...clone(), ...parsed };
+      }
+      return clone();
+    } catch (_) {
+      return clone();
     }
   }
   function saveObj(key, obj) {
