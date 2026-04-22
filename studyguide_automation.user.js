@@ -1228,6 +1228,52 @@
     el.classList.toggle('on', !!on);
   }
 
+  // Apply visual_needs returned by Start Exam Verification to the UI toggles
+  // + mutate the in-memory imageConfig + persist it. This is what keeps image
+  // generation ready throughout the pipeline.
+  function applyVisualNeedsToUI(vn) {
+    if (!vn || typeof vn !== 'object') return;
+
+    const need = (k) => !!vn[k];
+
+    const map = [
+      // GPT field             → imageConfig field           → toggle id
+      ['images_required',       'enableGemini',               'tog-enableGemini'],
+      ['equations_required',    'equationsAsImages',          'tog-equationsAsImages'],
+      ['equations_required',    'mathVisualRendering',        'tog-mathVisualRendering'],
+      ['charts_required',       'generateCharts',             'tog-generateCharts'],
+      ['charts_required',       'dataChartsSupplyDemand',     'tog-dataChartsSupplyDemand'],
+      ['diagrams_required',     'generateDiagrams',           'tog-generateDiagrams'],
+      ['diagrams_required',     'networkAnatomyFlow',         'tog-networkAnatomyFlow'],
+    ];
+
+    // Never down-toggle images if they're already on — only raise.
+    map.forEach(([gptKey, cfgKey, togId]) => {
+      const v = need(gptKey);
+      if (v) {
+        imageConfig[cfgKey] = true;
+      }
+      setToggle(togId, !!imageConfig[cfgKey]);
+    });
+
+    // If the exam genuinely needs no images at all, respect GPT — but the
+    // master toggle (enableGemini) is always kept ON unless the user later
+    // disables it manually. We never auto-turn it OFF here.
+    saveObj(STORAGE_KEYS.IMAGE_CONFIG, imageConfig);
+
+    // Log a crisp summary
+    const parts = [];
+    if (vn.images_required)     parts.push('images');
+    if (vn.equations_required)  parts.push('equations');
+    if (vn.charts_required)     parts.push('charts');
+    if (vn.diagrams_required)   parts.push('diagrams');
+    if (vn.reactions_required)  parts.push('reactions');
+    if (vn.code_required)       parts.push('code');
+    if (vn.tables_required)     parts.push('tables');
+    if (vn.case_studies)        parts.push('case-studies');
+    log(`🎨 Visual needs applied: ${parts.join(', ') || '(none)'}, frequency: ${vn.image_frequency || 'smart'}`, 'img');
+  }
+
   // ─────────────────────────────────────────────────────────────
   //  DOMAIN RENDER
   // ─────────────────────────────────────────────────────────────
@@ -1775,7 +1821,7 @@ Rules:
     btn.textContent = '⏳ Verifying...';
     log(`📋 Starting exam verification for "${examConfig.examName}"...`, 'info');
 
-    const prompt = `You are a study-guide architect. Verify the following exam and return ONLY STRICT JSON:
+    const prompt = `You are a study-guide architect. Verify the following exam and return ONLY STRICT JSON.
 
 Exam: ${examConfig.examName}
 
@@ -1789,14 +1835,32 @@ Return JSON (no prose):
   "question_types": [],
   "domains": [{"name":"","weight_percent":0,"subdomain_count":0}],
   "recommended_references": [],
+  "visual_needs": {
+    "images_required":     true,
+    "equations_required":  true,
+    "charts_required":     true,
+    "diagrams_required":   true,
+    "reactions_required":  false,
+    "code_required":       false,
+    "tables_required":     true,
+    "case_studies":        false,
+    "image_frequency":     "every_page | smart | rare | never",
+    "notes": "short reason why images are needed for this exam"
+  },
   "verified": true,
   "warnings": []
 }
 
 Rules:
-- If the exam is unknown or ambiguous, set "verified": false and list issues in "warnings".
-- Domain weights must sum to 100 when verified is true.
-- Use the exact official names (no paraphrasing).`;
+- If the exam is unknown or ambiguous: set "verified": false, list issues in "warnings".
+- Domain weights MUST sum to 100 when verified is true.
+- Use official names (no paraphrasing).
+- visual_needs MUST be populated truthfully based on the exam subject:
+    * Anatomy / Biology / Medical / Physics / Chemistry / Engineering / Networking / Programming / Math / Stats / Economics → images_required: true
+    * Chemistry → reactions_required: true, equations_required: true
+    * Math / Physics / Stats / Engineering / Economics → equations_required: true, charts_required: true
+    * Programming / Data structures / Algorithms → code_required: true
+- image_frequency: "every_page" for Anatomy/Medical/Biology-heavy visual exams; "smart" for most others; "rare" or "never" only for pure theory / literature / law.`;
 
     try {
       const raw = await sendToGPT(prompt);
@@ -1820,11 +1884,24 @@ Rules:
           domains = data.domains.map(d => ({
             name:   String(d.name || '').trim(),
             weight: parseFloat(d.weight_percent) || 0,
+            subdomains: [],
           })).filter(d => d.name);
           saveObj(STORAGE_KEYS.DOMAINS, domains);
           renderDomains();
         }
-        notify('Exam verified successfully!');
+
+        // Auto-apply visual_needs to the UI toggles so images + diagrams are
+        // ready for the whole pipeline.
+        const vn = data.visual_needs || {};
+        applyVisualNeedsToUI(vn);
+        // Persist the freq so the orchestrator can force-enable images when needed.
+        examConfig.imageFrequency = String(vn.image_frequency || 'smart').toLowerCase();
+        if (data.visual_needs && data.visual_needs.notes) {
+          log(`   Visual needs: ${vn.notes}`, 'img');
+        }
+        saveObj(STORAGE_KEYS.EXAM_CONFIG, examConfig);
+
+        notify('Exam verified + visual needs applied!');
       }
     } catch (err) {
       log(`✗ Exam verification error: ${err.message}`, 'error');
@@ -1993,6 +2070,18 @@ Rules:
       renderDomains();
       log(`✔ Parsed ${domains.length} domain(s), ${parsed.totalSub} subdomain(s).`, 'ok');
 
+      // 3b) Page allocation — give GPT exact page counts and let it commit
+      // to how many pages per domain + per subdomain so the total matches
+      // the UI value exactly. We parse it and cache into domains[*].pages
+      // + domains[*].subdomains[*].pages so per-page generation uses it.
+      log(`📏 Allocating ${examConfig.totalPages} pages across domains + subdomains (by weight)...`, 'info');
+      const allocPrompt = buildPageAllocationPrompt(domains, examConfig.totalPages);
+      const allocResp   = await sendToGPT(allocPrompt);
+      const alloc       = parsePageAllocation(allocResp, domains, examConfig.totalPages);
+      applyPageAllocation(alloc);
+      saveObj(STORAGE_KEYS.DOMAINS, domains);
+      renderDomains();
+
       // 4) Upload sample questions
       showStepNotify('Upload Sample Questions', 'Upload sample-question PDFs to ChatGPT, then click "✓ Confirm Samples".');
       notify('Upload sample-question PDFs to ChatGPT now.');
@@ -2132,6 +2221,128 @@ Then re-check only the previously MISSING items. Reply STRICT JSON:
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  PAGE ALLOCATION — commit GPT to exact page counts per sub-domain
+  // ─────────────────────────────────────────────────────────────
+  function buildPageAllocationPrompt(dArr, totalPages) {
+    const block = dArr.map((d, i) => {
+      const num = i + 1;
+      const subs = (d.subdomains || []).map((s, j) =>
+        `  Subdomain-${num}.${j+1}:${s.name}    ${(s.weight || 0).toFixed(1)}%`
+      ).join('\n');
+      return `Domain-${num}:${d.name}    ${(d.weight || 0).toFixed(1)}%\n${subs}`;
+    }).join('\n');
+
+    return `PAGE ALLOCATION — commit to exact page counts.
+
+Total pages to produce: ${totalPages}
+Domains + subdomains + weights (already detected):
+${block}
+
+TASK:
+Assign EXACT page counts so:
+  - The SUM of all Subdomain pages = ${totalPages} (no more, no less).
+  - Each Domain's page count = sum of its Subdomain pages.
+  - Page counts are proportional to each Subdomain's weight.
+  - Minimum of 1 page per subdomain.
+
+REPLY FORMAT — STRICT, NO EXTRA TEXT, NO COMMENTARY:
+Domain-1:<name>    <pages>p
+Subdomain-1.1:<name>    <pages>p
+Subdomain-1.2:<name>    <pages>p
+Domain-2:<name>    <pages>p
+Subdomain-2.1:<name>    <pages>p
+...
+
+Use exactly "<N>p" after the four spaces (e.g. "12p"). First line MUST match the above pattern. Do not output anything else.`;
+  }
+
+  function parsePageAllocation(text, dArr, totalPages) {
+    // Returns { domains: [{idx, pages}], subs: {"d.s": pages} }
+    const subs = {};
+    const dpages = {};
+    const lines = (text || '').split(/\r?\n/);
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      let m = line.match(/^Domain-(\d+)\s*:\s*.+?(?:\s{2,}|\t+)(\d+)\s*p$/i);
+      if (m) { dpages[+m[1]] = parseInt(m[2], 10); continue; }
+      m = line.match(/^Subdomain-(\d+)\.(\d+)\s*:\s*.+?(?:\s{2,}|\t+)(\d+)\s*p$/i);
+      if (m) { subs[`${m[1]}.${m[2]}`] = parseInt(m[3], 10); continue; }
+      // Tolerate single-space separators
+      m = line.match(/^Subdomain-(\d+)\.(\d+)\s*:\s*.+?\s+(\d+)\s*p$/i);
+      if (m) { subs[`${m[1]}.${m[2]}`] = parseInt(m[3], 10); }
+    }
+
+    // Fallback: if GPT didn't return a usable allocation, distribute evenly by weight.
+    const subCount = dArr.reduce((s, d) => s + (d.subdomains || []).length, 0);
+    if (Object.keys(subs).length === 0 && subCount > 0) {
+      log('⚠ GPT did not return allocation — distributing by weight locally.', 'warn');
+      const totalWeight = dArr.reduce((s, d) => s + (d.weight || 0), 0) || 100;
+      dArr.forEach((d, di) => {
+        const subsArr = d.subdomains || [];
+        const subWeightSum = subsArr.reduce((s, sd) => s + (sd.weight || 0), 0) || subsArr.length;
+        subsArr.forEach((sd, si) => {
+          const share = (d.weight || 0) / totalWeight *
+                        ((sd.weight || 1) / subWeightSum);
+          subs[`${di+1}.${si+1}`] = Math.max(1, Math.round(share * totalPages));
+        });
+      });
+    }
+
+    // Normalize so the total exactly matches totalPages
+    let assigned = Object.values(subs).reduce((a, b) => a + b, 0);
+    if (assigned !== totalPages && Object.keys(subs).length) {
+      const keys = Object.keys(subs);
+      // Sort by largest first to absorb the delta
+      keys.sort((a, b) => subs[b] - subs[a]);
+      let delta = totalPages - assigned;
+      let idx = 0;
+      while (delta !== 0 && keys.length > 0) {
+        const k = keys[idx % keys.length];
+        if (delta > 0) { subs[k] += 1; delta -= 1; }
+        else if (subs[k] > 1) { subs[k] -= 1; delta += 1; }
+        idx++;
+        if (idx > 10000) break; // safety
+      }
+    }
+
+    // Recompute domain pages from subs
+    dArr.forEach((_, di) => {
+      dpages[di + 1] = 0;
+      (dArr[di].subdomains || []).forEach((_, si) => {
+        dpages[di + 1] += subs[`${di+1}.${si+1}`] || 0;
+      });
+    });
+
+    return { subs, dpages };
+  }
+
+  function applyPageAllocation(alloc) {
+    if (!alloc || !alloc.subs) return;
+    let pageCursor = 1;
+    const totalPages = examConfig.totalPages;
+    domains.forEach((d, di) => {
+      d.pages = alloc.dpages[di + 1] || 0;
+      d.startPage = pageCursor;
+      (d.subdomains || []).forEach((sd, si) => {
+        sd.pages = alloc.subs[`${di+1}.${si+1}`] || 1;
+        sd.startPage = pageCursor;
+        sd.endPage   = pageCursor + sd.pages - 1;
+        pageCursor = sd.endPage + 1;
+      });
+      d.endPage = pageCursor - 1;
+    });
+    const assigned = pageCursor - 1;
+    log(`📐 Page allocation: ${assigned} / ${totalPages} pages committed.`, assigned === totalPages ? 'ok' : 'warn');
+    domains.forEach((d, i) => {
+      log(`   Domain ${i+1}: "${d.name}" → ${d.pages}p (p${d.startPage}–${d.endPage})`, 'sys');
+      (d.subdomains || []).forEach((sd, j) => {
+        log(`     ${i+1}.${j+1} "${sd.name}" → ${sd.pages}p (p${sd.startPage}–${sd.endPage})`, 'sys');
+      });
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
   //  CONTENT GENERATORS
   // ─────────────────────────────────────────────────────────────
   async function generateOverview(domain, domainNum) {
@@ -2209,23 +2420,32 @@ Return the markdown only.`;
   }
 
   async function generateSubdomainContent(domain, domainNum, sub, subNum, isFirstSubOfDomain) {
-    const pagesForSub = Math.max(1, Math.round(((sub.weight || 0) / 100) * examConfig.totalPages));
-    log(`📄 Generating ${pagesForSub} page(s) for Subdomain-${domainNum}.${subNum}: ${sub.name}`, 'info');
+    // Use the committed page count from the page-allocation step
+    const pagesForSub = Math.max(
+      1,
+      parseInt(sub.pages, 10) ||
+        Math.round(((sub.weight || 0) / 100) * examConfig.totalPages)
+    );
+    const subStart = sub.startPage || '?';
+    const subEnd   = sub.endPage   || '?';
+    log(`📄 Generating ${pagesForSub} page(s) for Subdomain-${domainNum}.${subNum}: ${sub.name} (p${subStart}–${subEnd})`, 'info');
 
     for (let p = 1; p <= pagesForSub; p++) {
       if (abortFlag) return;
+      const absPage = (sub.startPage || 0) + p - 1;
       const headingBlock = (p === 1)
         ? `${isFirstSubOfDomain ? `#Domain-${domainNum}:${domain.name}\n` : ''}##Subdomain-${domainNum}.${subNum}:${sub.name}\n\n`
         : '';
       const prompt = `Content page ${p}/${pagesForSub} for Subdomain-${domainNum}.${subNum}: "${sub.name}" (of Domain-${domainNum}: "${domain.name}").
+Absolute book page: ${absPage} of ${examConfig.totalPages}.
 
 - Target ~${examConfig.wordsPerPage} words.
-- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines, each with a concrete example that fully conveys the concept to a student.
-- Use only ### headings for specific topics — NO generic names, NO repeats, NO bold substitutes.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines. Every paragraph MUST end with an "Example:" and a "Purpose:" sentence so the reader fully grasps the concept before moving on.
+- Use only ### headings for specific topics — NO generic names ("Introduction", "Overview", "Key Points"), NO repeats, NO bold substitutes.
 ${p === 1
   ? `- BEGIN the response with exactly this heading block:\n${headingBlock}`
-  : `- Continue. Do NOT repeat # or ## headings.`}
-- Reference-book sourced only.
+  : `- Continue from previous page. Do NOT repeat any # or ## headings.`}
+- Reference-book sourced only. If content missing: "REFERENCE_NOT_FOUND: <topic>".
 Reply with the page content only.`;
       await runAndPostPage({
         promptText: prompt,
@@ -2309,6 +2529,18 @@ Reply with the page content only.`;
   // ─────────────────────────────────────────────────────────────
   async function maybeGenerateImagesForPage(pageText, label) {
     try {
+      // Exam-type-driven override: if verification told us this exam needs
+      // every page to have a visual, force the image prompt even if GPT
+      // would otherwise say "no image needed".
+      const freq = (examConfig.imageFrequency || 'smart').toLowerCase();
+      const forceAlways = freq === 'every_page';
+      const skipAll     = freq === 'never';
+      if (skipAll) return [];
+
+      const instr = forceAlways
+        ? `This exam has image_frequency=every_page. You MUST return needs_image:true with at least ONE high-quality textbook-style image prompt that fits the page content (diagram/chart/anatomical figure/chemical structure/circuit/etc). Never return needs_image:false.`
+        : `Include an image prompt ONLY if the page truly requires a diagram / chart / anatomical figure / chemical structure / circuit diagram to be understood. Otherwise return needs_image:false with prompts:[].`;
+
       const checkResp = await sendToGPT(`Analyse the page you just wrote for "${label}".
 Reply STRICT JSON only:
 {
@@ -2317,7 +2549,7 @@ Reply STRICT JSON only:
     {"title": "short title", "prompt": "one paragraph extremely detailed image generation prompt, textbook quality, labels, no watermarks"}
   ]
 }
-Rules: Include an image prompt ONLY if the page truly requires a diagram / chart / anatomical figure / chemical structure / circuit diagram to be understood. Otherwise return needs_image:false with prompts:[].`);
+Rules: ${instr}`);
       const data = extractJSON(checkResp);
       if (!data || !data.needs_image || !Array.isArray(data.prompts) || !data.prompts.length) {
         return [];
