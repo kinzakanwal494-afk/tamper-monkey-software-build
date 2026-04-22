@@ -1795,6 +1795,7 @@
       log('⚠ Sample mapping auto-detect runs on ChatGPT. Open chatgpt.com.', 'warn');
       return;
     }
+    abortFlag = false;  // never leave a prior Stop/Reset poisoning this call
     if (!examConfig.examName) {
       log('⚠ Set Exam Name first.', 'warn');
       return;
@@ -1910,6 +1911,7 @@ Return STRICT JSON ONLY in this shape, no prose:
       log('⚠ Auto-detect runs on ChatGPT. Please run from chatgpt.com.', 'warn');
       return;
     }
+    abortFlag = false;
     log('🔍 Asking GPT to extract domains + weights from the uploaded outline...', 'info');
     const prompt = `From the exam outline I just uploaded, extract ALL domains and their official weight percentages.
 Return STRICT JSON ONLY in this shape — no prose, no commentary:
@@ -1956,6 +1958,13 @@ Rules:
       log('⚠ Exam verification runs on ChatGPT. Open chatgpt.com and retry.', 'warn');
       return;
     }
+
+    // CRITICAL: reset control flags. If the user previously hit Stop / Reset
+    // or an earlier run threw, abortFlag stays true and every subsequent
+    // GPT call rejects with "Aborted" within 300 ms.
+    abortFlag = false;
+    pauseFlag = false;
+    skipFlag  = false;
 
     const btn = $('#sg-btn-verify');
     btn.disabled = true;
@@ -3165,6 +3174,8 @@ ${prompt}`;
     if (!examConfig.examName) { log('⚠ Set Exam Name first.', 'warn'); return; }
     if (!domains || !domains.length) { log('⚠ No domains yet — run Start Generation first.', 'warn'); return; }
     if (!isOnGPT()) { log('⚠ Open chatgpt.com to generate practice questions.', 'warn'); return; }
+    abortFlag = false;
+    pauseFlag = false;
     log(`🎓 Generating practice questions for ${domains.length} domain(s)...`, 'info');
     for (let i = 0; i < domains.length; i++) {
       if (abortFlag) break;
