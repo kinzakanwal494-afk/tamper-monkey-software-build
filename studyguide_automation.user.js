@@ -31,6 +31,7 @@
   const STORAGE_KEYS = {
     APPS_SCRIPT_URL: `${APP_ID}_appsScriptUrl`,
     DOC_ID:          `${APP_ID}_docId`,
+    SECRET_KEY:      `${APP_ID}_secretKey`,
     EXAM_CONFIG:     `${APP_ID}_examConfig`,
     IMAGE_CONFIG:    `${APP_ID}_imageConfig`,
     DOMAINS:         `${APP_ID}_domains`,
@@ -1105,7 +1106,7 @@
           <div id="sg-console"></div>
         </div>
 
-        <!-- Apps Script config (utility, small footer) -->
+        <!-- Apps Script config -->
         <div class="sg-section">
           <div class="sg-section-title"><span>🔗 Google Docs Connection</span></div>
           <div class="sg-field">
@@ -1116,7 +1117,15 @@
             <label>Google Doc ID</label>
             <input type="text" id="sg-doc-id" placeholder="Doc ID (from URL)" />
           </div>
-          <button class="sg-save-btn" id="sg-save-docs">💾 Save Docs Config</button>
+          <div class="sg-field">
+            <label>Secret Key</label>
+            <input type="password" id="sg-secret-key" placeholder="same as Apps Script secret..." />
+          </div>
+          <div class="sg-grid-2" style="gap:6px">
+            <button class="sg-save-btn" id="sg-save-docs" style="margin-top:0">💾 Save Docs Config</button>
+            <button class="sg-save-btn" id="sg-test-conn" style="margin-top:0;background:linear-gradient(135deg,#0891b2,#0e7490)">🧪 Test Connection</button>
+          </div>
+          <div id="sg-conn-result" style="display:none;margin-top:7px;padding:6px 10px;border-radius:6px;font-size:11px;font-family:monospace"></div>
         </div>
 
       </div>
@@ -1195,6 +1204,7 @@
     // Docs
     $('#sg-apps-script-url').value = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
     $('#sg-doc-id').value          = GM_getValue(STORAGE_KEYS.DOC_ID, '');
+    const sk = $('#sg-secret-key'); if (sk) sk.value = GM_getValue(STORAGE_KEYS.SECRET_KEY, '');
 
     // Workflow
     applyWorkflowUI();
@@ -1338,6 +1348,7 @@
     $('#sg-save-image').addEventListener('click', saveImageConfig);
     $('#sg-save-ref').addEventListener('click', saveRefConfig);
     $('#sg-save-docs').addEventListener('click', saveDocsConfig);
+    const tcBtn = $('#sg-test-conn'); if (tcBtn) tcBtn.addEventListener('click', testDocsConnection);
     $('#sg-save-practice').addEventListener('click', savePracticeConfig);
     $('#sg-gen-practice').addEventListener('click', generatePracticeQuestions);
     $('#sg-save-sample').addEventListener('click', saveSampleMapping);
@@ -1470,12 +1481,87 @@
   }
 
   function saveDocsConfig() {
-    const url   = $('#sg-apps-script-url').value.trim();
-    const docId = $('#sg-doc-id').value.trim();
+    const url    = $('#sg-apps-script-url').value.trim();
+    const docId  = $('#sg-doc-id').value.trim();
+    const secret = ($('#sg-secret-key')?.value || '').trim();
     GM_setValue(STORAGE_KEYS.APPS_SCRIPT_URL, url);
     GM_setValue(STORAGE_KEYS.DOC_ID, docId);
+    GM_setValue(STORAGE_KEYS.SECRET_KEY, secret);
     log('✔ Google Docs connection saved.', 'ok');
     notify('Docs connection saved!');
+  }
+
+  function testDocsConnection() {
+    const result = $('#sg-conn-result');
+    const url    = $('#sg-apps-script-url').value.trim();
+    const docId  = $('#sg-doc-id').value.trim();
+    const secret = ($('#sg-secret-key')?.value || '').trim();
+
+    if (!url || !docId) {
+      if (result) {
+        result.style.display = 'block';
+        result.style.background = 'rgba(239,68,68,.08)';
+        result.style.color = '#f87171';
+        result.textContent = '✗ URL and Doc ID required';
+      }
+      return;
+    }
+    if (result) {
+      result.style.display = 'block';
+      result.style.background = 'rgba(59,130,246,.08)';
+      result.style.color = '#60a5fa';
+      result.textContent = '⏳ Testing...';
+    }
+
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url,
+      headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ secret, docId, action: 'ping' }),
+      timeout: 15000,
+      onload: (r) => {
+        if (r.status >= 200 && r.status < 400) {
+          let serverErr = null;
+          try {
+            const resp = JSON.parse(r.responseText || '{}');
+            if (resp.status === 'error') serverErr = resp.message || 'Server error';
+          } catch (_) {}
+          if (result) {
+            result.style.display = 'block';
+            if (serverErr) {
+              result.style.background = 'rgba(239,68,68,.08)';
+              result.style.color = '#f87171';
+              result.textContent = '✗ ' + serverErr;
+            } else {
+              result.style.background = 'rgba(16,185,129,.08)';
+              result.style.color = '#4ade80';
+              result.textContent = '✓ Connection successful';
+            }
+          }
+        } else if (result) {
+          result.style.display = 'block';
+          result.style.background = 'rgba(239,68,68,.08)';
+          result.style.color = '#f87171';
+          result.textContent = `✗ HTTP ${r.status}`;
+        }
+      },
+      onerror: () => {
+        if (result) {
+          result.style.display = 'block';
+          result.style.background = 'rgba(239,68,68,.08)';
+          result.style.color = '#f87171';
+          result.textContent = '✗ Network unreachable';
+        }
+      },
+      ontimeout: () => {
+        if (result) {
+          result.style.display = 'block';
+          result.style.background = 'rgba(239,68,68,.08)';
+          result.style.color = '#f87171';
+          result.textContent = '✗ Timed out';
+        }
+      },
+    });
   }
 
   function savePracticeConfig() {
@@ -1579,19 +1665,10 @@ Return STRICT JSON ONLY in this shape, no prose:
     const host = window.location.hostname;
     if (host.includes('chatgpt') || host.includes('openai')) {
       log(`📎 Opening GPT upload dialog for ${kind}...`, 'info');
-      // Focus the "+" attach button if present
-      const plusBtn = document.querySelector(
-        'button[aria-label*="Attach"], button[aria-label*="upload"], button[data-testid="attachments-menu-button"]'
-      );
-      if (plusBtn) {
-        plusBtn.click();
-        log('✔ GPT attach menu opened. Select your file.', 'ok');
-      } else {
-        log('⚠ Attach button not found — scroll to ChatGPT input and click the "+" manually.', 'warn');
-      }
+      GPT.triggerUpload();
     } else {
-      log('ℹ Open ChatGPT in a new tab and use the "+" to upload.', 'info');
-      GM_openInTab('https://chatgpt.com/', { active: true });
+      log('ℹ Open ChatGPT in a new tab and use the + to upload.', 'info');
+      try { GM_openInTab('https://chatgpt.com/', { active: true }); } catch (_) {}
     }
   }
 
@@ -2363,31 +2440,8 @@ Rules:
     return breakdown;
   }
 
-  function postQuestionsToDoc({ domain, domainNum, batchIdx, questions }) {
-    const url   = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
-    const docId = GM_getValue(STORAGE_KEYS.DOC_ID, '');
-    if (!url || !docId) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify({
-          docId,
-          kind: 'practice_questions',
-          subject: examConfig.examName,
-          domain,
-          domainNum,
-          batchIdx,
-          questions,
-          generatedAt: new Date().toISOString(),
-        }),
-        onload: (r) => (r.status >= 200 && r.status < 300)
-          ? (log(`📤 Practice batch ${batchIdx} posted to doc.`, 'sys'), resolve())
-          : reject(new Error(`HTTP ${r.status}`)),
-        onerror: () => reject(new Error('Network error')),
-      });
-    });
+  async function postQuestionsToDoc(args) {
+    return DOCS.postQuestions(args);
   }
 
   function pauseGeneration() {
@@ -2632,103 +2686,378 @@ Label every part. Textbook quality. No watermarks.`,
     return h.includes('chatgpt') || h.includes('openai');
   }
 
-  async function sendToGPT(prompt) {
-    const textarea = await waitForElement(
-      'textarea[data-id="root"], #prompt-textarea, textarea[placeholder], div#prompt-textarea[contenteditable="true"]',
-      15000
-    );
-    if (!textarea) throw new Error('ChatGPT input not found');
+  // ChatGPT interaction layer — hardened (multi-strategy injection, streaming-aware wait, upload helper)
+  const GPT = {
+    getInput() {
+      return document.getElementById('prompt-textarea')
+          || document.querySelector('.ProseMirror[contenteditable="true"]')
+          || document.querySelector('[contenteditable="true"][role="textbox"]')
+          || document.querySelector('textarea[data-id="root"]')
+          || document.querySelector('textarea[placeholder]');
+    },
+    getSend() {
+      return document.querySelector('[data-testid="send-button"]')
+          || document.querySelector('button[aria-label*="Send" i]')
+          || document.querySelector('button[aria-label="Send prompt"]');
+    },
+    getStop() {
+      return document.querySelector('[data-testid="stop-button"]')
+          || document.querySelector('button[aria-label*="Stop" i]');
+    },
+    isStreaming() {
+      if (this.getStop()) return true;
+      if (document.querySelector('[class*="result-streaming"]')) return true;
+      return false;
+    },
+    countMsgs() {
+      return document.querySelectorAll('[data-message-author-role="assistant"]').length;
+    },
+    getLatest() {
+      const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+      if (!msgs.length) return '';
+      const last = msgs[msgs.length - 1];
+      const sels = ['.markdown.prose', '.markdown', '.prose', '[class*="markdown"]', '[class*="prose"]', '.whitespace-pre-wrap'];
+      for (const s of sels) {
+        const el = last.querySelector(s);
+        if (el && (el.textContent || '').trim().length > 5) return el.textContent.trim();
+      }
+      return (last.textContent || '').trim();
+    },
 
-    // contenteditable vs textarea
-    if (textarea.tagName.toLowerCase() === 'textarea') {
-      setNativeValue(textarea, prompt);
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      textarea.focus();
-      textarea.innerText = prompt;
-      textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    }
-    await sleep(400);
+    async injectText(text) {
+      let el = this.getInput();
+      if (!el) { await sleep(800); el = this.getInput(); }
+      if (!el) { log('ChatGPT textarea not found.', 'error'); return false; }
 
-    const sendBtn = await waitForElement(
-      'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label*="Send"]',
-      5000
-    );
-    if (!sendBtn) throw new Error('Send button not found');
-    sendBtn.click();
+      try { el.focus(); await sleep(40); el.innerHTML = ''; el.dispatchEvent(new Event('input', { bubbles: true })); await sleep(60); } catch (_) {}
 
-    return await waitForGPTResponse();
-  }
+      // Strategy 1: execCommand insertText (works for ProseMirror)
+      try {
+        el.focus();
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+        await sleep(30);
+        document.execCommand('insertText', false, text);
+        await sleep(150);
+        if ((el.textContent || el.value || '').trim().length > 20) return true;
+      } catch (_) {}
 
-  async function waitForGPTResponse(timeoutMs = 180000) {
-    const start = Date.now();
-    await sleep(2500);
-    return new Promise((resolve, reject) => {
-      const check = setInterval(() => {
-        if (abortFlag) { clearInterval(check); reject(new Error('Aborted')); return; }
-        if (Date.now() - start > timeoutMs) {
-          clearInterval(check);
-          reject(new Error('GPT response timeout'));
-          return;
+      // Strategy 2: native value setter (HTMLTextArea)
+      try {
+        const ns = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+        if (ns && el.tagName === 'TEXTAREA') {
+          ns.set.call(el, text);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          await sleep(150);
+          if ((el.value || '').trim().length > 20) return true;
         }
-        const stopBtn = document.querySelector(
-          'button[aria-label="Stop generating"], button[data-testid="stop-button"]'
-        );
-        if (stopBtn) return;
+      } catch (_) {}
 
-        const msgs = document.querySelectorAll(
-          '[data-message-author-role="assistant"], .markdown.prose, .prose'
-        );
-        if (msgs.length > 0) {
-          const last = msgs[msgs.length - 1];
-          const t = (last.innerText || last.textContent || '').trim();
-          if (t.length > 20) {
-            clearInterval(check);
-            resolve(t);
+      // Strategy 3: React fiber onChange
+      try {
+        const fk = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+        if (fk) {
+          let node = el[fk];
+          while (node) {
+            if (node.memoizedProps && node.memoizedProps.onChange) {
+              node.memoizedProps.onChange({ target: { value: text } });
+              break;
+            }
+            node = node.return;
           }
+          await sleep(200);
+          if ((el.textContent || el.value || '').trim().length > 20) return true;
         }
-      }, 1200);
-    });
-  }
+      } catch (_) {}
 
-  // ─────────────────────────────────────────────────────────────
-  //  POST TO GOOGLE DOC (Apps Script)
-  // ─────────────────────────────────────────────────────────────
-  function postPageToDoc({ page, text, images, wordCount }) {
-    const url   = GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, '');
-    const docId = GM_getValue(STORAGE_KEYS.DOC_ID, '');
-    if (!url || !docId) {
-      log('⚠ Apps Script URL or Doc ID missing — page not posted.', 'warn');
-      return Promise.resolve();
-    }
+      // Strategy 4: synthetic paste event
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+        await sleep(250);
+        if ((el.textContent || el.value || '').trim().length > 20) return true;
+      } catch (_) {}
 
-    return new Promise((resolve, reject) => {
-      const payload = {
-        docId,
-        subject:    examConfig.examName,
-        pageNumber: page,
-        text,
-        images,
-        wordCount,
-        domains,
-        generatedAt: new Date().toISOString(),
-      };
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify(payload),
-        onload: (resp) => {
-          if (resp.status >= 200 && resp.status < 300) {
-            log(`📤 Page ${page} posted to Google Doc.`, 'sys');
-            resolve();
-          } else {
-            reject(new Error(`HTTP ${resp.status}`));
+      // Strategy 5: direct textContent + InputEvent
+      try {
+        el.focus();
+        el.textContent = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        await sleep(300);
+        return true;
+      } catch (e) {
+        log('All inject methods failed: ' + e.message, 'error');
+        return false;
+      }
+    },
+
+    async clickSend() {
+      for (let i = 0; i < 30; i++) {
+        const btn = this.getSend();
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        await sleep(100);
+      }
+      return false;
+    },
+
+    async send(text) {
+      const el = this.getInput();
+      if (el) {
+        try { el.innerHTML = ''; el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+        await sleep(50);
+      }
+      const ok = await this.injectText(text);
+      if (!ok) throw new Error('Text injection failed');
+      await sleep(150);
+      const sent = await this.clickSend();
+      if (!sent) throw new Error('Send button failed');
+      await sleep(200);
+    },
+
+    // Streaming-aware wait: waits for stop button to disappear + text to stabilize
+    waitForDone(timeoutMs) {
+      const timeout = timeoutMs || 300000;
+      return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const initCount = this.countMsgs();
+        let lastLen = 0, lastText = '', stable = 0, started = false, stoppedAt = 0;
+        const POLL_MS = 300, STOP_GRACE = 400, STABLE_NEED = 2;
+        const t = setInterval(() => {
+          if (abortFlag) { clearInterval(t); reject(new Error('Aborted')); return; }
+          if (pauseFlag) return;
+          if (Date.now() - start > timeout) {
+            clearInterval(t);
+            reject(new Error(`GPT response timeout after ${Math.round(timeout / 1000)}s`));
+            return;
           }
-        },
-        onerror: (e) => reject(new Error('Network error')),
+          const streaming = this.isStreaming();
+          const count = this.countMsgs();
+          const text = this.getLatest();
+          const len = text.length;
+          if (!started) {
+            if (streaming || count > initCount) { started = true; lastLen = len; lastText = text; }
+            lastLen = len;
+            return;
+          }
+          if (streaming) { stable = 0; stoppedAt = 0; lastLen = len; lastText = text; return; }
+          if (stoppedAt === 0 && len > 0) { stoppedAt = Date.now(); lastLen = len; lastText = text; }
+          if (stoppedAt > 0 && Date.now() - stoppedAt < STOP_GRACE) return;
+          if (len > 0 && len === lastLen && text === lastText) {
+            stable++;
+            if (stable >= STABLE_NEED) { clearInterval(t); resolve(text); }
+          } else { stable = 0; lastLen = len; lastText = text; }
+        }, POLL_MS);
       });
-    });
+    },
+
+    // Trigger the ChatGPT attachment upload dialog
+    triggerUpload() {
+      // Step 1: direct file input
+      const directFi = document.querySelector('input[type="file"]');
+      if (directFi) { directFi.click(); return; }
+
+      // Step 2: find the + / attach / paperclip button
+      const plusSelectors = [
+        '[data-testid="composer-plus-btn"]',
+        '[data-testid="composer-attach-btn"]',
+        '[data-testid="attachments-menu-button"]',
+        'button[aria-label*="attach" i]',
+        'button[aria-label*="upload" i]',
+        'button[aria-label*="add" i]',
+        'button[aria-label*="file" i]',
+        'button[aria-label*="paperclip" i]',
+        'button[aria-label*="plus" i]',
+        'form button svg[data-icon="paperclip"]',
+        'form button svg[data-icon="plus"]',
+      ];
+      let plusBtn = null;
+      for (const sel of plusSelectors) {
+        const el = document.querySelector(sel);
+        if (el) { plusBtn = el.closest('button') || el; break; }
+      }
+      if (!plusBtn) {
+        const composerArea = document.querySelector('form,#prompt-textarea,div[contenteditable]')?.closest('div');
+        if (composerArea) {
+          for (const btn of composerArea.querySelectorAll('button')) {
+            const lbl = (btn.getAttribute('aria-label') || btn.title || btn.textContent || '').toLowerCase();
+            if (lbl && !lbl.includes('send') && !lbl.includes('stop') && !lbl.includes('submit')) {
+              plusBtn = btn; break;
+            }
+          }
+        }
+      }
+      if (plusBtn) {
+        plusBtn.click();
+        setTimeout(() => {
+          const menuSelectors = '[role="menuitem"],[role="option"],button,li,[role="listitem"]';
+          for (const el of document.querySelectorAll(menuSelectors)) {
+            if (!el.offsetParent) continue;
+            const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+            if (t.includes('upload') || t.includes('computer') || t.includes('file') || t.includes('attach')) {
+              el.click();
+              setTimeout(() => {
+                const fi = document.querySelector('input[type="file"]');
+                if (fi) fi.click();
+              }, 400);
+              return;
+            }
+          }
+          const fi = document.querySelector('input[type="file"]');
+          if (fi) fi.click();
+          else log('⚠ ChatGPT upload menu not found — click + manually.', 'warn');
+        }, 600);
+        return;
+      }
+      log('⚠ Could not find upload button — click + in ChatGPT manually.', 'warn');
+    },
+  };
+
+  // Thin compatibility wrappers so the rest of the codebase keeps working.
+  async function sendToGPT(prompt) {
+    await GPT.send(prompt);
+    return await GPT.waitForDone();
+  }
+  async function waitForGPTResponse(timeoutMs = 300000) {
+    return await GPT.waitForDone(timeoutMs);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  GOOGLE DOCS POSTER (Apps Script protocol)
+  // ─────────────────────────────────────────────────────────────
+  const DOCS = {
+    _cfg() {
+      return {
+        url:    GM_getValue(STORAGE_KEYS.APPS_SCRIPT_URL, ''),
+        docId:  GM_getValue(STORAGE_KEYS.DOC_ID, ''),
+        secret: GM_getValue(STORAGE_KEYS.SECRET_KEY, ''),
+      };
+    },
+    _sendRaw(rawData) {
+      const cfg = this._cfg();
+      if (!cfg.url || !cfg.docId) return Promise.reject(new Error('Missing URL/DocID'));
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: cfg.url,
+          headers: { 'Content-Type': 'application/json; charset=UTF-8', 'Accept': 'application/json, */*' },
+          data: rawData,
+          timeout: 90000,
+          onload: (r) => {
+            if (r.status >= 200 && r.status < 400) {
+              try {
+                const resp = JSON.parse(r.responseText || '{}');
+                if (resp.status === 'error') { reject(new Error('Apps Script: ' + (resp.message || 'unknown'))); return; }
+              } catch (_) {}
+              resolve();
+            } else reject(new Error(`HTTP ${r.status}: ${(r.responseText || '').slice(0, 200)}`));
+          },
+          onerror: () => reject(new Error('Network error')),
+          ontimeout: () => reject(new Error('Request timed out after 90s')),
+        });
+      });
+    },
+
+    async sendChunk(content, section) {
+      const cfg = this._cfg();
+      const payload = {
+        secret: String(cfg.secret || '').trim(),
+        docId:  String(cfg.docId).trim(),
+        action: 'append',
+        section: String(section || '').trim(),
+        content: String(content || ''),
+      };
+      return this._sendRaw(JSON.stringify(payload));
+    },
+
+    async sendWithRetry(content, section, attempts = 5) {
+      let lastErr = '';
+      for (let i = 1; i <= attempts; i++) {
+        try {
+          await this.sendChunk(content, section);
+          log(`📤 Saved to Docs: "${section}"`, 'sys');
+          return;
+        } catch (e) {
+          lastErr = e.message;
+          log(`Docs save attempt ${i}/${attempts} failed: ${e.message}`, 'warn');
+          if (i < attempts) await sleep(Math.min(2000 * i, 12000));
+        }
+      }
+      log(`✗ Docs save failed after ${attempts} attempts: "${section}": ${lastErr}`, 'error');
+    },
+
+    // Post an arbitrary text block — chunks on paragraph boundaries if > 40KB
+    async post(content, section) {
+      let text = String(content || '').replace(/^\n+/, '').replace(/\n+$/, '');
+      if (!text) return;
+      if (text.length <= 40000) { await this.sendWithRetry(text, section); return; }
+      const paragraphs = text.split('\n\n');
+      let chunk = '', idx = 1;
+      for (const p of paragraphs) {
+        const add = p + '\n\n';
+        if (chunk.length > 0 && (chunk.length + add.length) > 40000) {
+          await this.sendWithRetry(chunk, `${section} (Part ${idx})`);
+          chunk = add; idx++;
+        } else {
+          chunk += add;
+        }
+      }
+      if (chunk.replace(/\n/g, '').trim()) await this.sendWithRetry(chunk, `${section} (Part ${idx})`);
+    },
+
+    async postImage(imageRecord, section) {
+      if (!imageRecord) return;
+      const cfg = this._cfg();
+      const payload = {
+        secret: String(cfg.secret || '').trim(),
+        docId:  String(cfg.docId).trim(),
+        action: 'appendImage',
+        section: String(section || '').trim(),
+        imageCaption: imageRecord.label || imageRecord.topic || 'Figure',
+        imageSrc:     imageRecord.src || '',
+        imageData:    imageRecord.dataUrl || '',
+        asciiArt:     imageRecord.asciiArt || '',
+      };
+      try {
+        await this._sendRaw(JSON.stringify(payload));
+        log(`🖼 Image saved to Docs: "${payload.imageCaption}"`, 'sys');
+      } catch (e) {
+        log(`⚠ Image save failed: ${e.message} — falling back to text placeholder.`, 'warn');
+        const fallback = imageRecord.asciiArt
+          ? `\n📊 FIGURE: ${payload.imageCaption}\n\`\`\`\n${imageRecord.asciiArt}\n\`\`\`\n`
+          : `\n[📊 DIAGRAM: ${payload.imageCaption}]\n`;
+        await this.post(fallback, section);
+      }
+    },
+
+    async postQuestions({ domain, domainNum, batchIdx, questions }) {
+      const lines = [`\n## Practice Questions — Domain ${domainNum}: ${domain} (Batch ${batchIdx})\n`];
+      questions.forEach((q, i) => {
+        lines.push(`**Q${i + 1} [${q.type || '—'}]** — ${q.statement || q.question || ''}`);
+        const opts = q.options || {};
+        Object.keys(opts).forEach(k => lines.push(`  ${k}) ${opts[k]}`));
+        if (q.correct_answer) lines.push(`**Answer:** ${q.correct_answer}`);
+        if (q.explanation)    lines.push(`**Explanation:** ${q.explanation}`);
+        if (q.reference_topic)lines.push(`_Ref: ${q.reference_topic}_`);
+        lines.push('');
+      });
+      await this.post(lines.join('\n'), `Practice Questions — Domain ${domainNum} (Batch ${batchIdx})`);
+    },
+  };
+
+  // Wrapper used by the orchestrator
+  function postPageToDoc({ page, text, images, wordCount, label }) {
+    const section = `${label ? `[${label}] ` : ''}Page ${page} — ${examConfig.examName}${wordCount ? ` (~${wordCount}w)` : ''}`;
+    return (async () => {
+      await DOCS.post(text, section);
+      if (images && images.length) {
+        for (const img of images) {
+          if (abortFlag) break;
+          await DOCS.postImage(img, `${section} — Figure: ${img.label || img.topic || ''}`);
+        }
+      }
+    })();
   }
 
   // ─────────────────────────────────────────────────────────────
