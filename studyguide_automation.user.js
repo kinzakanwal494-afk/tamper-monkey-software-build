@@ -1130,8 +1130,30 @@
 
       </div>
 
-      <!-- Missing reference popup -->
-      <div id="sg-popup-overlay">
+    `;
+
+    document.body.appendChild(panel);
+
+    // Overlays MUST be siblings of the panel (not inside it) so they render
+    // as real full-screen modals and aren't clipped by the panel's overflow.
+    buildOverlays();
+
+    // Tiny floating button that reopens the panel after the user closes it.
+    buildRestoreButton();
+
+    applyConfigsToUI();
+    renderDomains();
+    renderSampleMapping();
+    updateProgressUI();
+    bindEvents();
+  }
+
+  function buildOverlays() {
+    // Missing-reference popup
+    if (!document.getElementById('sg-popup-overlay')) {
+      const o = document.createElement('div');
+      o.id = 'sg-popup-overlay';
+      o.innerHTML = `
         <div id="sg-popup">
           <h3 id="sg-popup-title">⚠ Missing Reference</h3>
           <p id="sg-popup-body">GPT could not find the referenced content. Upload the missing reference or skip this page.</p>
@@ -1139,11 +1161,15 @@
             <button class="sg-step-btn primary" id="sg-popup-upload">📎 Upload Reference</button>
             <button class="sg-step-btn" id="sg-popup-skip">⏭ Skip Page</button>
           </div>
-        </div>
-      </div>
-
-      <!-- Missing-book popup (from reference verification) -->
-      <div id="sg-book-popup-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.72);display:none;align-items:center;justify-content:center;z-index:2147483646">
+        </div>`;
+      document.body.appendChild(o);
+    }
+    // Missing-book popup
+    if (!document.getElementById('sg-book-popup-overlay')) {
+      const o2 = document.createElement('div');
+      o2.id = 'sg-book-popup-overlay';
+      o2.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);display:none;align-items:center;justify-content:center;z-index:2147483646';
+      o2.innerHTML = `
         <div style="background:#0b1220;border:1px solid #f59e0b;border-radius:12px;padding:22px;width:460px;max-width:90vw;color:#e2e8f0;box-shadow:0 25px 60px rgba(0,0,0,0.8)">
           <h3 style="margin:0 0 10px 0;color:#fbbf24;font-size:16px">⚠ Missing Book / Data Detected</h3>
           <p id="sg-book-popup-body" style="font-size:12px;color:#cbd5e1;line-height:1.5;margin-bottom:14px">
@@ -1154,16 +1180,36 @@
             <button class="sg-step-btn primary" id="sg-book-popup-add">📎 Add New Book</button>
             <button class="sg-step-btn" id="sg-book-popup-confirm">✓ Confirm New Book</button>
           </div>
-        </div>
-      </div>
-    `;
+        </div>`;
+      document.body.appendChild(o2);
+    }
+  }
 
-    document.body.appendChild(panel);
-    applyConfigsToUI();
-    renderDomains();
-    renderSampleMapping();
-    updateProgressUI();
-    bindEvents();
+  function buildRestoreButton() {
+    if (document.getElementById('sg-restore-btn')) return;
+    const b = document.createElement('button');
+    b.id = 'sg-restore-btn';
+    b.textContent = '📖';
+    b.title = 'Re-open StudyGuide panel';
+    b.style.cssText = `
+      position:fixed;top:16px;right:16px;width:44px;height:44px;border-radius:50%;
+      border:none;background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;font-size:20px;
+      box-shadow:0 8px 24px rgba(0,0,0,0.5);cursor:pointer;z-index:2147483645;display:none;
+    `;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const p = document.getElementById('sg-panel');
+      if (p) { p.style.display = 'flex'; p.classList.remove('collapsed'); }
+      b.style.display = 'none';
+    });
+    document.body.appendChild(b);
+  }
+
+  function closePanel() {
+    const p = document.getElementById('sg-panel');
+    if (p) p.style.display = 'none';
+    const r = document.getElementById('sg-restore-btn');
+    if (r) r.style.display = 'block';
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -1397,12 +1443,10 @@
   }
 
   function bindEvents() {
+    // IMPORTANT: Do NOT attach click-to-collapse on the whole header — it
+    // swallows clicks targeted at the toggle / close buttons sitting inside it.
     on('#sg-toggle-btn', 'click', (e) => { e.stopPropagation(); togglePanel(); });
-    on('#sg-header',     'click', togglePanel);
-    on('#sg-close-btn',  'click', (e) => {
-      e.stopPropagation();
-      const p = $('#sg-panel'); if (p) p.style.display = 'none';
-    });
+    on('#sg-close-btn',  'click', (e) => { e.stopPropagation(); closePanel(); });
 
     // Saves
     on('#sg-save-exam',     'click', saveExamConfig);
@@ -2343,29 +2387,43 @@ Use exactly "<N>p" after the four spaces (e.g. "12p"). First line MUST match the
   }
 
   // ─────────────────────────────────────────────────────────────
+  //  SHARED WRITING-STYLE RULES
+  // ─────────────────────────────────────────────────────────────
+  const STYLE_RULES = `
+WRITING STYLE — MANDATORY, ZERO EXCEPTIONS:
+- Use the uploaded reference books as a knowledge source ONLY. Read them, understand the concepts professionally, then rewrite in your own words.
+- Do NOT copy sentences from the books verbatim. Paraphrase the concept so it is clear for a student.
+- Do NOT write in the author's tone, in the reader's tone ("you", "the student", "the reader"), or in any specific company / brand voice.
+- Do NOT mention books, chapters, authors, companies, or brands by name inside the body ("According to X", "Company Y uses", "This chapter explains").
+- Write in a neutral, professional, educational tone — just the concept, its mechanism, and an illustrative example.
+- Every paragraph must leave the reader with a clear conceptual understanding of the topic.
+- If a concept is not supported by the uploaded books, output: "REFERENCE_NOT_FOUND: <topic>".
+`;
+
+  // ─────────────────────────────────────────────────────────────
   //  CONTENT GENERATORS
   // ─────────────────────────────────────────────────────────────
   async function generateOverview(domain, domainNum) {
-    log(`📖 Overview for ${domain.name} (2 pages × 500 words)...`, 'info');
+    log(`📖 Overview for ${domain.name} (2 pages × ~500 words, heading only, no sub-headings)...`, 'info');
+    const subNames = (domain.subdomains || []).map(s => s.name).join(', ');
     for (let p = 1; p <= 2; p++) {
       if (abortFlag) return;
-      const headingBlock = (p === 1)
-        ? `#Domain-${domainNum}:${domain.name}
-${(domain.subdomains || []).map((s, i) => `##Subdomain-${domainNum}.${i+1}:${s.name}`).join('\n')}
+      const firstPageHeader = (p === 1) ? `###Overview\n\n` : '';
+      const prompt = `Write OVERVIEW page ${p} of 2 for Domain-${domainNum}: "${domain.name}".
 
-`
-        : '';
-      const prompt = `Overview page ${p} of 2 for Domain-${domainNum}: "${domain.name}".
+CONTENT SCOPE:
+- Synthesize the core concepts of this whole domain and ALL its subdomains (${subNames}) into flowing prose.
+- Explain what the domain as a whole is about and how its sub-areas connect together.
 
-Rules:
-- Target exactly ~500 words.
-- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each, with a clear example inside each paragraph.
-- Use ### headings only for sub-topics.
-- No bold substitutes for headings.
-- Reference-book sourced only.
-${p === 1
-  ? `- BEGIN the response with exactly this block (first page of domain):\n${headingBlock}`
-  : `- Continue the overview. Do NOT repeat #Domain / ##Subdomain headings.`}
+${STYLE_RULES}
+
+STRUCTURE RULES:
+- Target ~500 words on this page.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each, ending with a short "Example:" sentence.
+- ${p === 1
+    ? `Begin with exactly:\n${firstPageHeader}Then only running paragraphs. NO other headings of any kind. No #, ##, or ### headings other than the single "###Overview" heading at the very top.`
+    : `Do NOT emit any heading whatsoever. Continue the overview seamlessly from the previous page. Plain paragraphs only.`}
+- Absolutely NO sub-section headings, NO bullet lists, NO tables.
 
 Reply with the page content only.`;
       await runAndPostPage({
@@ -2377,12 +2435,22 @@ Reply with the page content only.`;
   }
 
   async function generatePurposePage(domain, domainNum) {
-    log(`🎯 Main-purpose page for ${domain.name} (~600 words)...`, 'info');
-    const prompt = `Main purpose page for Domain-${domainNum}: "${domain.name}".
+    log(`🎯 Main Purpose page for ${domain.name} (~600 words, heading only)...`, 'info');
+    const prompt = `Write the MAIN PURPOSE page for Domain-${domainNum}: "${domain.name}".
+
+CONTENT SCOPE:
+- Explain, in flowing prose, why this domain exists, what problems it solves, and what overall outcomes its study is meant to achieve.
+
+${STYLE_RULES}
+
+STRUCTURE RULES:
+- Begin with exactly:
+###Main Purpose
+
+- After that, ONLY running paragraphs — absolutely NO other headings, NO bullet lists, NO tables.
 - Target ~600 words on this single page.
-- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines, each with an example.
-- Use only ### headings (no #, no ##).
-- Reference-book sourced only.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each, ending with a short "Example:" sentence.
+
 Reply with the page content only.`;
     await runAndPostPage({
       promptText: prompt,
@@ -2392,29 +2460,49 @@ Reply with the page content only.`;
   }
 
   async function generateSubdomainTable(domain, domainNum) {
-    log(`📊 Subdomain purpose table for ${domain.name}...`, 'info');
-    const prompt = `Produce a single markdown table titled "###Subdomain Purpose Table" for Domain-${domainNum}: "${domain.name}".
-Columns: | # | Subdomain | Purpose |
-Include every subdomain of this domain (${(domain.subdomains || []).map(s => s.name).join(' | ')}).
-Purpose column: 1–2 sentences, reference-book sourced only.
+    log(`📊 Target Covered table for ${domain.name}...`, 'info');
+    const subList = (domain.subdomains || []).map((s, i) => `${domainNum}.${i+1} ${s.name}`).join(' | ');
+    const prompt = `Produce a single markdown section titled "###Target Covered" for Domain-${domainNum}: "${domain.name}".
+
+CONTENT:
+- A markdown TABLE listing, for every subdomain of this domain (${subList}), what is covered inside it and to what depth.
+- Columns: | # | Subdomain | What is covered | Depth of coverage |
+- "What is covered" = 1–2 sentence summary of the concrete topics, mechanisms and skills inside that subdomain.
+- "Depth of coverage" = one of: Foundational / Intermediate / Advanced — plus a very short reason.
+
+${STYLE_RULES}
+
+STRICT FORMAT:
+- ONLY the "###Target Covered" heading at the top, then the table.
+- NO other headings. NO prose outside the table. NO bullet lists.
+
 Return the markdown only.`;
     await runAndPostPage({
       promptText: prompt,
-      label:      `subtable_d${domainNum}`,
+      label:      `target_covered_d${domainNum}`,
       allowImages:false,
     });
   }
 
   async function generateMemoryTable(domain, domainNum) {
-    log(`🧠 Memory-check table for ${domain.name}...`, 'info');
-    const prompt = `Produce a single markdown table titled "###Memory Check" for Domain-${domainNum}: "${domain.name}".
-Columns: | Term / Shortcut | 1-line definition |
-Include 8–15 of the most important shortcuts / key terms / mnemonics from this domain,
-one per row, each with a single-line definition from the reference books only.
+    log(`🧠 Memory Check table for ${domain.name}...`, 'info');
+    const prompt = `Produce a single markdown section titled "###Memory Check" for Domain-${domainNum}: "${domain.name}".
+
+CONTENT:
+- A markdown TABLE of 10–20 of the most important key terms, shortcuts, acronyms, and mnemonics of this whole domain.
+- Columns: | # | Term / Shortcut | 1-line definition |
+- Each definition must be a single, self-contained line that is enough to recall the concept.
+
+${STYLE_RULES}
+
+STRICT FORMAT:
+- ONLY the "###Memory Check" heading at the top, then the table.
+- NO other headings. NO prose outside the table. NO bullet lists.
+
 Return the markdown only.`;
     await runAndPostPage({
       promptText: prompt,
-      label:      `memtable_d${domainNum}`,
+      label:      `memory_check_d${domainNum}`,
       allowImages:false,
     });
   }
@@ -2439,13 +2527,16 @@ Return the markdown only.`;
       const prompt = `Content page ${p}/${pagesForSub} for Subdomain-${domainNum}.${subNum}: "${sub.name}" (of Domain-${domainNum}: "${domain.name}").
 Absolute book page: ${absPage} of ${examConfig.totalPages}.
 
-- Target ~${examConfig.wordsPerPage} words.
-- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines. Every paragraph MUST end with an "Example:" and a "Purpose:" sentence so the reader fully grasps the concept before moving on.
-- Use only ### headings for specific topics — NO generic names ("Introduction", "Overview", "Key Points"), NO repeats, NO bold substitutes.
+${STYLE_RULES}
+
+STRUCTURE RULES:
+- Target ~${examConfig.wordsPerPage} words on this page.
+- Paragraphs: ${examConfig.minLinesPerPara}–${examConfig.maxLinesPerPara} lines each. Every paragraph MUST end with one short "Example:" sentence and one short "Purpose:" sentence so the reader fully grasps the concept before moving on.
+- Use ### headings ONLY for specific concrete topic names (e.g. "###TCP Three-Way Handshake"). Absolutely NO generic names ("Introduction", "Overview", "Key Points", "Summary"). NO repeated headings. NO bold substitutes for headings.
 ${p === 1
   ? `- BEGIN the response with exactly this heading block:\n${headingBlock}`
-  : `- Continue from previous page. Do NOT repeat any # or ## headings.`}
-- Reference-book sourced only. If content missing: "REFERENCE_NOT_FOUND: <topic>".
+  : `- Continue from the previous page. Do NOT repeat any # or ## headings. Start directly with a fresh ### specific-topic heading.`}
+
 Reply with the page content only.`;
       await runAndPostPage({
         promptText: prompt,
@@ -2594,34 +2685,59 @@ Rules: ${instr}`);
 
   async function generatePracticeQuestionsForDomain(domain, domainNum) {
     const subCount   = (domain.subdomains || []).length;
-    const perSubRule = 10;                                  // 10 per subdomain baseline
+    const perSubRule = 10;
     const totalFromUI = practiceConfig.totalQuestions || 0;
-    // Distribute the UI total proportionally to domain weight if > 0, otherwise use perSubRule * subCount
+
+    // Distribute UI total proportionally to domain weight; fallback = 10/sub.
     let qForDomain;
     if (totalFromUI > 0) {
       const totalWeight = domains.reduce((s, d) => s + (d.weight || 0), 0) || 100;
-      qForDomain = Math.round((domain.weight / totalWeight) * totalFromUI);
+      qForDomain = Math.max(1, Math.round((domain.weight / totalWeight) * totalFromUI));
     } else {
       qForDomain = perSubRule * subCount;
     }
     if (qForDomain <= 0) qForDomain = perSubRule * subCount;
 
     const typeBreakdown = buildTypeBreakdown(qForDomain);
-    log(`🎓 Domain ${domainNum} — generating ${qForDomain} practice question(s): ${JSON.stringify(typeBreakdown)}`, 'info');
+    const optionsCount  = Math.max(2, parseInt(sampleMapping.optionsCount?.weight || 4, 10));
+    const stmtLen       = parseInt(sampleMapping.statementsLength?.weight || 25, 10);
+    log(`🎓 Domain ${domainNum} "${domain.name}" — generating ${qForDomain} practice Q with weighted split: ${JSON.stringify(typeBreakdown)}`, 'info');
 
     const batch = practiceConfig.perBatch || 10;
     let produced = 0;
     let batchIdx = 0;
-    while (produced < qForDomain && !abortFlag) {
-      const remaining = qForDomain - produced;
-      const thisBatch = Math.min(batch, remaining);
-      batchIdx++;
-      const prompt = `Generate ${thisBatch} practice question(s) for Domain-${domainNum}: "${domain.name}" using ONLY the reference books.
+    // Track how many of each type we've already produced so every batch can
+    // demand the remaining budget from GPT — this prevents the weighted split
+    // from getting skipped.
+    const remainingByType = { ...typeBreakdown };
 
-Distribution across the FULL domain target (${qForDomain} total Qs): ${JSON.stringify(typeBreakdown)}.
-Options per MCQ: ${Math.max(2, parseInt(sampleMapping.optionsCount?.weight || 4, 10))}.
-Typical statement length (words): ${parseInt(sampleMapping.statementsLength?.weight || 25, 10)}.
-Explanation length: ${practiceConfig.explMinLength}–${practiceConfig.explMaxLength} words.
+    while (produced < qForDomain && !abortFlag) {
+      const remainingTotal = qForDomain - produced;
+      const thisBatch = Math.min(batch, remainingTotal);
+      batchIdx++;
+
+      // For this batch, take a proportional slice of each type from the remaining budget.
+      const batchSplit = sliceBatchByType(remainingByType, thisBatch);
+      const splitLines = Object.entries(batchSplit)
+        .filter(([, v]) => v > 0)
+        .map(([k, v]) => `  - ${typeLabel(k)}: ${v}`).join('\n');
+
+      const optionLetters = alphaLetters(optionsCount); // ["A","B",...]
+      const optionSkeleton = '{' + optionLetters.map(l => `"${l}":""`).join(',') + '}';
+
+      const prompt = `Generate ${thisBatch} practice question(s) for Domain-${domainNum}: "${domain.name}" using ONLY the uploaded reference books.
+
+MANDATORY TYPE DISTRIBUTION for this batch of ${thisBatch} questions (DO NOT skip any non-zero type):
+${splitLines}
+
+RULES:
+- Spread questions evenly across the ${subCount} subdomain(s) of this domain.
+- Options per MCQ: exactly ${optionsCount} options labelled ${optionLetters.map(l => '(' + l + ')').join(', ')}.
+- Statement length: around ${stmtLen} words per question.
+- Explanation length: ${practiceConfig.explMinLength}–${practiceConfig.explMaxLength} words.
+- Explanation MUST NOT say the option label (e.g. no "A is correct because"). Explain WHY the correct answer is correct using the concept, then briefly say why the OTHER options are wrong. Do not reference option letters.
+- Reference-book sourced only. No fabrication. Concepts paraphrased — never copy sentences from the books.
+- No mention of authors / chapters / companies / brands / readers.
 
 Return STRICT JSON only:
 {
@@ -2632,17 +2748,13 @@ Return STRICT JSON only:
       "subdomain": "",
       "type": "scenario|definition|recall|application|fill_in_blank|chart_based",
       "statement": "",
-      "options": {"A":"","B":"","C":"","D":""},
-      "correct_answer": "A",
+      "options": ${optionSkeleton},
+      "correct_answer": "${optionLetters[0]}",
       "explanation": "",
       "reference_topic": ""
     }
   ]
-}
-Rules:
-- Respect distribution across the WHOLE domain run (across batches).
-- Reference-book sourced only. No fabrication.
-- Spread questions evenly across the ${subCount} subdomain(s).`;
+}`;
 
       try {
         const raw = await sendToGPT(prompt);
@@ -2650,17 +2762,18 @@ Rules:
         const arr = Array.isArray(data.questions) ? data.questions : [];
         if (!arr.length) throw new Error('No questions parsed');
 
-        await postQuestionsToDoc({
-          domain:    domain.name,
-          domainNum,
-          batchIdx,
-          questions: arr,
+        // Update remainingByType by the types actually produced.
+        arr.forEach(q => {
+          const t = normalizeType(q.type);
+          if (remainingByType[t] !== undefined && remainingByType[t] > 0) remainingByType[t] -= 1;
         });
+
+        await postQuestionsToDoc({ domain: domain.name, domainNum, batchIdx, questions: arr });
         produced += arr.length;
         progress.questions = (progress.questions || 0) + arr.length;
         saveObj(STORAGE_KEYS.PROGRESS, progress);
         updateProgressUI();
-        log(`✔ Practice batch ${batchIdx} → ${arr.length} Q (total ${produced}/${qForDomain}).`, 'ok');
+        log(`✔ Practice batch ${batchIdx} → ${arr.length} Q (total ${produced}/${qForDomain})`, 'ok');
       } catch (err) {
         log(`✗ Practice batch ${batchIdx} failed: ${err.message}`, 'error');
         break;
@@ -2670,8 +2783,10 @@ Rules:
   }
 
   function buildTypeBreakdown(totalQ) {
-    // Use sample-mapping % fields as the split; fallback to equal split.
-    const pctFields = ['scenarioBased','definitionType','recallStatement','applicationBased','fillInTheBlanks','chartsGraphsImg'];
+    const pctFields = [
+      'scenarioBased', 'definitionType', 'recallStatement',
+      'applicationBased', 'fillInTheBlanks', 'chartsGraphsImg'
+    ];
     const weights = {};
     let sum = 0;
     pctFields.forEach(k => {
@@ -2681,14 +2796,74 @@ Rules:
     });
     const breakdown = {};
     if (sum > 0) {
-      pctFields.forEach(k => {
-        breakdown[k] = Math.round((weights[k] / sum) * totalQ);
+      let assigned = 0;
+      pctFields.forEach((k, i) => {
+        if (i < pctFields.length - 1) {
+          breakdown[k] = Math.round((weights[k] / sum) * totalQ);
+          assigned += breakdown[k];
+        } else {
+          // Last field gets the remainder so the total matches exactly.
+          breakdown[k] = Math.max(0, totalQ - assigned);
+        }
       });
     } else {
+      // No weights → equal split
       const base = Math.floor(totalQ / pctFields.length);
-      pctFields.forEach((k, i) => { breakdown[k] = base + (i === 0 ? totalQ - base * pctFields.length : 0); });
+      const rem  = totalQ - base * pctFields.length;
+      pctFields.forEach((k, i) => { breakdown[k] = base + (i < rem ? 1 : 0); });
     }
     return breakdown;
+  }
+
+  function sliceBatchByType(remainingByType, batchSize) {
+    const keys = Object.keys(remainingByType);
+    const out  = {};
+    keys.forEach(k => { out[k] = 0; });
+    const totalRemaining = keys.reduce((s, k) => s + (remainingByType[k] || 0), 0);
+    if (totalRemaining <= 0) return out;
+    let placed = 0;
+    // Proportional, then round-robin fill for the leftover.
+    keys.forEach(k => {
+      const share = Math.floor((remainingByType[k] / totalRemaining) * batchSize);
+      out[k] = Math.min(share, remainingByType[k]);
+      placed += out[k];
+    });
+    let cursor = 0;
+    while (placed < batchSize) {
+      const k = keys[cursor % keys.length];
+      if (out[k] < (remainingByType[k] || 0)) { out[k] += 1; placed += 1; }
+      cursor++;
+      if (cursor > 10000) break;
+    }
+    return out;
+  }
+
+  function typeLabel(key) {
+    return ({
+      scenarioBased:   'Scenario-based',
+      definitionType:  'Definition',
+      recallStatement: 'Recall / Statemental',
+      applicationBased:'Application',
+      fillInTheBlanks: 'Fill in the blanks',
+      chartsGraphsImg: 'Chart / Graph / Image based',
+    })[key] || key;
+  }
+
+  function normalizeType(t) {
+    const s = String(t || '').toLowerCase();
+    if (s.includes('scenario'))             return 'scenarioBased';
+    if (s.includes('def'))                  return 'definitionType';
+    if (s.includes('recall') || s.includes('statement')) return 'recallStatement';
+    if (s.includes('application') || s.includes('apply')) return 'applicationBased';
+    if (s.includes('fill') || s.includes('blank'))         return 'fillInTheBlanks';
+    if (s.includes('chart') || s.includes('graph') || s.includes('image')) return 'chartsGraphsImg';
+    return 'definitionType';
+  }
+
+  function alphaLetters(n) {
+    const out = [];
+    for (let i = 0; i < n && i < 26; i++) out.push(String.fromCharCode(65 + i));
+    return out;
   }
 
   async function postQuestionsToDoc(args) {
@@ -2737,21 +2912,49 @@ Rules:
   }
 
   function resetEverything() {
-    if (!confirm('Reset ALL progress and saved data? This cannot be undone.')) return;
-    abortFlag = true;
-    pauseFlag = false;
-    progress = { ...DEFAULT_PROGRESS };
-    workflow = { ...DEFAULT_WORKFLOW };
-    domains  = [];
-    saveObj(STORAGE_KEYS.PROGRESS, progress);
-    saveObj(STORAGE_KEYS.WORKFLOW, workflow);
-    saveObj(STORAGE_KEYS.DOMAINS,  domains);
+    let ok = true;
+    try { ok = confirm('Reset ALL progress and saved data? This cannot be undone.'); }
+    catch (_) { ok = true; /* some hosts strip confirm */ }
+    if (!ok) return;
+
+    abortFlag     = true;
+    pauseFlag     = false;
+    skipFlag      = false;
+    pendingConfirm.outline = null;
+    pendingConfirm.books   = null;
+    pendingConfirm.samples = null;
+    pendingConfirm.newBook = null;
+
+    examConfig     = JSON.parse(JSON.stringify(DEFAULT_EXAM_CONFIG));
+    imageConfig    = JSON.parse(JSON.stringify(DEFAULT_IMAGE_CONFIG));
+    refConfig      = JSON.parse(JSON.stringify(DEFAULT_REF_CONFIG));
+    workflow       = JSON.parse(JSON.stringify(DEFAULT_WORKFLOW));
+    progress       = JSON.parse(JSON.stringify(DEFAULT_PROGRESS));
+    practiceConfig = JSON.parse(JSON.stringify(DEFAULT_PRACTICE_CONFIG));
+    sampleMapping  = JSON.parse(JSON.stringify(DEFAULT_SAMPLE_MAPPING));
+    domains        = [];
+
+    saveObj(STORAGE_KEYS.EXAM_CONFIG,     examConfig);
+    saveObj(STORAGE_KEYS.IMAGE_CONFIG,    imageConfig);
+    saveObj(STORAGE_KEYS.REF_CONFIG,      refConfig);
+    saveObj(STORAGE_KEYS.WORKFLOW,        workflow);
+    saveObj(STORAGE_KEYS.PROGRESS,        progress);
+    saveObj(STORAGE_KEYS.PRACTICE_CONFIG, practiceConfig);
+    saveObj(STORAGE_KEYS.SAMPLE_MAPPING,  sampleMapping);
+    saveObj(STORAGE_KEYS.DOMAINS,         domains);
+
+    applyConfigsToUI();
     applyWorkflowUI();
     renderDomains();
+    renderSampleMapping();
     updateProgressUI();
-    $('#sg-console').innerHTML = '';
+    hidePopup && hidePopup();
+    hideBookPopup && hideBookPopup();
+    hideStepNotify && hideStepNotify();
+    const cns = $('#sg-console'); if (cns) cns.innerHTML = '';
     setUIState(STATE.IDLE);
-    log('🗑 Reset complete.', 'warn');
+    log('🗑 Reset complete — all saved data cleared.', 'warn');
+    notify('Reset complete.');
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -3283,14 +3486,26 @@ Label every part. Textbook quality. No watermarks.`,
     },
 
     async postQuestions({ domain, domainNum, batchIdx, questions }) {
-      const lines = [`\n## Practice Questions — Domain ${domainNum}: ${domain} (Batch ${batchIdx})\n`];
+      // Exact format the user requested:
+      // Qn. statement
+      // (A) option one
+      // (B) option two
+      // ...
+      // Answer: X
+      // Explanation: ...
+      const lines = [`\n###Practice Questions — Domain ${domainNum}: ${domain} (Batch ${batchIdx})\n`];
+      const startIdx = (batchIdx - 1) * (questions.length || 1);
       questions.forEach((q, i) => {
-        lines.push(`**Q${i + 1} [${q.type || '—'}]** — ${q.statement || q.question || ''}`);
+        const n = startIdx + i + 1;
+        const stmt = String(q.statement || q.question || '').trim();
+        lines.push(`Q${n}. ${stmt}`);
         const opts = q.options || {};
-        Object.keys(opts).forEach(k => lines.push(`  ${k}) ${opts[k]}`));
-        if (q.correct_answer) lines.push(`**Answer:** ${q.correct_answer}`);
-        if (q.explanation)    lines.push(`**Explanation:** ${q.explanation}`);
-        if (q.reference_topic)lines.push(`_Ref: ${q.reference_topic}_`);
+        Object.keys(opts).forEach(k => {
+          const v = String(opts[k] || '').trim();
+          if (v) lines.push(`(${k}) ${v}`);
+        });
+        if (q.correct_answer) lines.push(`Answer: ${String(q.correct_answer).trim()}`);
+        if (q.explanation)    lines.push(`Explanation: ${String(q.explanation).trim()}`);
         lines.push('');
       });
       await this.post(lines.join('\n'), `Practice Questions — Domain ${domainNum} (Batch ${batchIdx})`);
