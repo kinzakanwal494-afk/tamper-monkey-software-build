@@ -23,6 +23,68 @@
   'use strict';
 
   // ─────────────────────────────────────────────────────────────
+  //  TRUSTED TYPES SHIM  (must run before any innerHTML assignment)
+  //  Recent ChatGPT builds enforce "require-trusted-types-for 'script'"
+  //  which rejects raw string innerHTML and kills our whole UI with
+  //  "This document requires 'TrustedHTML' assignment." Register a
+  //  local policy and transparently wrap every innerHTML/outerHTML
+  //  setter used by our panel's code.
+  // ─────────────────────────────────────────────────────────────
+  (function installTrustedTypesShim() {
+    try {
+      if (!(window.trustedTypes && typeof window.trustedTypes.createPolicy === 'function')) return;
+
+      let policy = null;
+      try {
+        policy = window.trustedTypes.createPolicy('studyguide-auto', {
+          createHTML:      (s) => String(s),
+          createScript:    (s) => String(s),
+          createScriptURL: (s) => String(s),
+        });
+      } catch (_) {
+        // The name might already be taken if the script re-injects — fall
+        // back to a uniquely-named policy so we still get a working wrapper.
+        try {
+          policy = window.trustedTypes.createPolicy('studyguide-auto-' + Date.now(), {
+            createHTML:      (s) => String(s),
+            createScript:    (s) => String(s),
+            createScriptURL: (s) => String(s),
+          });
+        } catch (err) {
+          console.warn('[StudyGuide] Unable to create Trusted Types policy:', err);
+          return;
+        }
+      }
+
+      const patch = (proto, prop) => {
+        if (!proto) return;
+        const desc = Object.getOwnPropertyDescriptor(proto, prop);
+        if (!desc || !desc.set) return;
+        if (proto['__sgPatched_' + prop]) return;
+        const origSet = desc.set;
+        Object.defineProperty(proto, prop, {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get: desc.get,
+          set(v) {
+            try {
+              if (typeof v === 'string') v = policy.createHTML(v);
+            } catch (_) {}
+            return origSet.call(this, v);
+          },
+        });
+        proto['__sgPatched_' + prop] = true;
+      };
+
+      patch(Element.prototype, 'innerHTML');
+      patch(Element.prototype, 'outerHTML');
+      if (window.ShadowRoot && ShadowRoot.prototype) patch(ShadowRoot.prototype, 'innerHTML');
+    } catch (err) {
+      console.warn('[StudyGuide] Trusted Types shim failed:', err);
+    }
+  })();
+
+  // ─────────────────────────────────────────────────────────────
   //  CONSTANTS & STORAGE
   // ─────────────────────────────────────────────────────────────
   const APP_ID = 'SG_V13';
@@ -4347,35 +4409,72 @@ Label every part. Textbook quality. No watermarks.`,
 
   // Re-attach our nodes to document.body if they were removed by a React
   // re-render. Runs cheaply in a MutationObserver.
+  let _sgEnsureBusy = false;
+  let _sgLastRebuild = 0;
   function ensureMounted() {
-    if (!document.body) return;
-    if (_sgPanelEl && _sgPanelEl.isConnected === false) {
-      document.body.appendChild(_sgPanelEl);
-    }
-    _sgOverlayEls.forEach(el => {
-      if (el && el.isConnected === false) document.body.appendChild(el);
-    });
-    if (_sgRestoreEl && _sgRestoreEl.isConnected === false) {
-      document.body.appendChild(_sgRestoreEl);
-    }
-    // If somehow everything is gone, rebuild from scratch
-    if (!document.getElementById('sg-panel')) {
+    if (_sgEnsureBusy) return;
+    _sgEnsureBusy = true;
+    try {
+      if (!document.body) return;
+
+      // Fast path: panel is live — refresh our reference and return.
+      const live = document.getElementById('sg-panel');
+      if (live) { _sgPanelEl = live; return; }
+
+      // Try to re-attach the node we still hold.
       try {
-        buildUI();
-        captureMountedNodes();
-        console.warn('[StudyGuide] Panel was removed by the host page — rebuilt.');
-      } catch (err) {
-        console.error('[StudyGuide] Rebuild failed:', err);
+        if (_sgPanelEl && _sgPanelEl.isConnected === false) {
+          document.body.appendChild(_sgPanelEl);
+        }
+      } catch (_) {}
+      _sgOverlayEls.forEach(el => {
+        try { if (el && el.isConnected === false) document.body.appendChild(el); } catch (_) {}
+      });
+      try {
+        if (_sgRestoreEl && _sgRestoreEl.isConnected === false) {
+          document.body.appendChild(_sgRestoreEl);
+        }
+      } catch (_) {}
+
+      // Only rebuild from scratch as a last resort, and at most every 6s,
+      // so we don't fight ChatGPT's re-renders.
+      if (!document.getElementById('sg-panel')) {
+        const now = Date.now();
+        if (now - _sgLastRebuild < 6000) return;
+        _sgLastRebuild = now;
+        try {
+          buildUI();
+          captureMountedNodes();
+          console.warn('[StudyGuide] Panel was removed by host page — rebuilt.');
+        } catch (err) {
+          console.error('[StudyGuide] Rebuild failed:', err);
+        }
       }
+    } finally {
+      _sgEnsureBusy = false;
     }
   }
 
   function startMountGuard() {
     try {
-      const mo = new MutationObserver(() => ensureMounted());
-      mo.observe(document.documentElement, { childList: true, subtree: true });
-      // Also a low-frequency safety tick in case the observer is throttled
-      setInterval(ensureMounted, 2000);
+      // Throttled observer — only watches document.body for direct child
+      // removals and schedules a single ensureMounted() call at most every
+      // 400 ms. This avoids the storm that killed the UI on modern ChatGPT.
+      let pending = null;
+      const schedule = () => {
+        if (pending) return;
+        pending = setTimeout(() => { pending = null; ensureMounted(); }, 400);
+      };
+      const mo = new MutationObserver(muts => {
+        for (const m of muts) {
+          if (m.removedNodes && m.removedNodes.length) { schedule(); return; }
+        }
+      });
+      if (document.body) {
+        mo.observe(document.body, { childList: true, subtree: false });
+      }
+      // Gentle safety tick
+      setInterval(ensureMounted, 4000);
     } catch (err) {
       console.error('[StudyGuide] Mount guard failed:', err);
     }
