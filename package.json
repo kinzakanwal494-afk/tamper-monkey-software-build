@@ -1,0 +1,20 @@
+{
+  "name": "studyguide-ai-automation",
+  "version": "13.0.0",
+  "description": "StudyGuide AI Automation — Tampermonkey userscript + Google Apps Script for automated exam study guide generation",
+  "private": true,
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "node --test test/",
+    "validate": "node --check studyguide_automation.user.js && node --input-type=commonjs -e \"new (require('vm').Script)(require('fs').readFileSync('apps_script/Code.gs','utf8')); console.log('Code.gs: syntax OK')\""
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "globals": "^15.0.0"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
