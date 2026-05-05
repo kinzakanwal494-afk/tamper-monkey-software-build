@@ -1,0 +1,39 @@
+{
+  "env": {
+    "browser": true,
+    "greasemonkey": true,
+    "es2021": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2021,
+    "sourceType": "script"
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "off",
+    "no-redeclare": "warn"
+  },
+  "overrides": [
+    {
+      "files": ["*.gs"],
+      "env": {
+        "browser": false
+      },
+      "globals": {
+        "PropertiesService": "readonly",
+        "DocumentApp": "readonly",
+        "UrlFetchApp": "readonly",
+        "Utilities": "readonly",
+        "ContentService": "readonly",
+        "Logger": "readonly",
+        "DriveApp": "readonly",
+        "HtmlService": "readonly",
+        "ScriptApp": "readonly",
+        "Session": "readonly",
+        "SpreadsheetApp": "readonly",
+        "CacheService": "readonly",
+        "LockService": "readonly"
+      }
+    }
+  ]
+}

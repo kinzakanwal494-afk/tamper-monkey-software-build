@@ -1,0 +1,18 @@
+{
+  "name": "tamper-monkey-software-build",
+  "version": "13.0.0",
+  "description": "StudyGuide AI Automation - Tampermonkey userscript + Google Apps Script for automated study guide generation",
+  "main": "StudyGuide_v13.user.js",
+  "scripts": {
+    "lint": "eslint . --ext .js,.gs",
+    "lint:fix": "eslint . --ext .js,.gs --fix",
+    "validate": "node -e \"const fs=require('fs'); ['StudyGuide_v13.user.js','Code.gs'].forEach(f=>{try{new Function(fs.readFileSync(f,'utf8'));console.log(f+': OK')}catch(e){console.error(f+': ERROR -',e.message);process.exit(1)}})\"",
+    "test": "npm run validate && npm run lint"
+  },
+  "keywords": ["tampermonkey", "userscript", "google-apps-script", "study-guide", "automation"],
+  "author": "StudyGuide Automation",
+  "license": "ISC",
+  "devDependencies": {
+    "eslint": "^8.57.1"
+  }
+}
